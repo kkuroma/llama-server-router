@@ -1,0 +1,20 @@
+services:
+  llama-server:
+    build:
+      context: ./build
+      dockerfile: Dockerfile
+    ports:
+      - "11434:11434"
+    image: llama-router
+    container_name: llama-server
+    restart: unless-stopped
+    volumes:
+      - ./llm/models:/models:ro
+      - ./llm/configs:/configs:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

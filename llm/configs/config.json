@@ -1,0 +1,27 @@
+{
+    "LLM" : {
+        "GPT-OSS-20b": {
+            "num_instance": 1
+        },
+        "GLM-4.7-Flash": {
+            "num_instance": 1
+        },
+        "Qwen3-4B-Instruct": {
+            "num_instance": 2
+        }
+    },
+    "ROUTER": {
+        "HEALTH_CHECK_INTERVAL": 1.0,
+        "HEALTH_CHECK_TIMEOUT": 30.0,
+        "UNLOAD_POLL_INTERVAL": 0.5,
+        "UNLOAD_POLL_TIMEOUT": 60.0,
+        "LOAD_POLL_INTERVAL": 1.0,
+        "LOAD_POLL_TIMEOUT": 120.0,
+        "START_RETRIES": 3,
+        "GRACEFUL_KILL_TIMEOUT": 5.0
+    },
+    "API-port": 11434,
+    "LLM-base-port": 30000,
+    "llama-server-executable": "/app/llama-server"
+}
+
