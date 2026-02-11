@@ -33,7 +33,7 @@ async def make_request(session, model, topic, delay, req_id):
     payload = {"model": model, "temperature": 0,
                "messages": [{"role": "user", "content": f"Write a 250 word essay about {topic}. Start the essay with the word {topic}"}]}
     try:
-        async with session.post("http://localhost:11434/v1/chat/completions", json=payload) as resp:
+        async with session.post("http://localhost:11435/v1/chat/completions", json=payload) as resp:
             j = await resp.json()
             end = time.perf_counter()
             content = j["choices"][0]["message"].get("content", "")

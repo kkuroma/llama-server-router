@@ -1,0 +1,12 @@
+[  0.00s] ID 0: GLM-4.7-Flash |  30.72 tps | Correct: True
+[  2.64s] ID 1: Qwen3-4B-Instruct |   1.35 tps | Correct: True
+[  6.02s] ID 2: Qwen3-4B-Instruct |   1.51 tps | Correct: True
+[  8.38s] ID 3: GLM-4.7-Flash |  26.89 tps | Correct: True
+[ 18.03s] ID 6: GLM-4.7-Flash |  27.04 tps | Correct: True
+[ 20.00s] ID 8: GLM-4.7-Flash |  24.98 tps | Correct: True
+[ 28.08s] ID 9: GLM-4.7-Flash |  13.97 tps | Correct: True
+[ 43.46s] ID 14: GLM-4.7-Flash |  15.69 tps | Correct: True
+[ 45.31s] ID 15: Qwen3-4B-Instruct |   1.11 tps | Correct: True
+[ 45.54s] ID 16: Qwen3-4B-Instruct |   1.08 tps | Correct: True
+[ 50.82s] ID 17: Qwen3-4B-Instruct |   0.97 tps | Correct: True
+[ 55.62s] ID 19: GLM-4.7-Flash |  26.29 tps | Correct: True
