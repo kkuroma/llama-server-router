@@ -1,11 +1,16 @@
 import asyncio
 import json
+import os
 import subprocess
 import sys
 from enum import Enum
 from collections import Counter
 import httpx
 import time
+
+import aiosqlite
+
+HISTORY_DB_PATH = os.environ.get("HISTORY_DB_PATH", "/webui/monitor/history.db")
 
 # All available statuses
 class Status(Enum):
@@ -126,6 +131,61 @@ class LLMRouter:
         self._has_requests = asyncio.Event()
         self._running = False
         self._scheduler_task: asyncio.Task | None = None
+        self._history_db_path = HISTORY_DB_PATH
+        self._history_db_ready = False
+
+    # History DB
+
+    async def init_history_db(self):
+        os.makedirs(os.path.dirname(self._history_db_path), exist_ok=True)
+        async with aiosqlite.connect(self._history_db_path) as db:
+            await db.execute("PRAGMA journal_mode=WAL")
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    model TEXT NOT NULL,
+                    request_time REAL NOT NULL,
+                    response_time REAL NOT NULL,
+                    prompt_n INTEGER NOT NULL,
+                    predicted_n INTEGER NOT NULL
+                )
+            """)
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_history_model ON history(model)")
+            await db.commit()
+        self._history_db_ready = True
+
+    async def _ensure_history_db(self):
+        if not self._history_db_ready:
+            await self.init_history_db()
+
+    async def record_history(self, model: str, request_time: float, response_time: float, prompt_n: int, predicted_n: int):
+        try:
+            await self._ensure_history_db()
+            async with aiosqlite.connect(self._history_db_path) as db:
+                await db.execute(
+                    "INSERT INTO history (model, request_time, response_time, prompt_n, predicted_n) VALUES (?, ?, ?, ?, ?)",
+                    (model, request_time, response_time, prompt_n, predicted_n),
+                )
+                await db.commit()
+        except Exception as e:
+            print(f"[ROUTER] failed to record history: {e}", flush=True)
+
+    async def get_history(self, model: str | None = None) -> list[dict]:
+        await self._ensure_history_db()
+        async with aiosqlite.connect(self._history_db_path) as db:
+            db.row_factory = aiosqlite.Row
+            if model:
+                cursor = await db.execute("SELECT * FROM history WHERE model = ? ORDER BY request_time DESC", (model,))
+            else:
+                cursor = await db.execute("SELECT * FROM history ORDER BY request_time DESC")
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+    async def reset_history(self):
+        await self._ensure_history_db()
+        async with aiosqlite.connect(self._history_db_path) as db:
+            await db.execute("DELETE FROM history")
+            await db.commit()
 
     async def _start_instance(self, port: int) -> int | None:
         '''
@@ -136,7 +196,7 @@ class LLMRouter:
         exe = self.router_config["llama-server-executable"]
         proc = subprocess.Popen(
             [exe, "--host", "0.0.0.0", "--port", str(port),
-             "--models-preset", self.llama_presets_path],
+             "--models-preset", self.llama_presets_path, "--metrics"],
             stdout=subprocess.DEVNULL, # sys.stdout,
             stderr=subprocess.DEVNULL, # sys.stderr,
         )
@@ -413,8 +473,10 @@ class LLMRouter:
                 "request": request,
                 "future": future,
                 "is_streaming": is_streaming,
+                "request_time": time.time(),
             })
             self._has_requests.set()
+            self.status = Status.SERVING
         return future
 
     async def _scheduler(self):
@@ -482,6 +544,18 @@ class LLMRouter:
                     timeout=300.0,
                 )
             entry["future"].set_result(resp)
+            # Record history from usage/timings
+            try:
+                data = resp.json()
+                timings = data.get("timings", {})
+                usage = data.get("usage", {})
+                prompt_n = timings.get("prompt_n", usage.get("prompt_tokens", 0))
+                predicted_n = timings.get("predicted_n", usage.get("completion_tokens", 0))
+                model = entry["request"].get("model", "unknown")
+                if prompt_n or predicted_n:
+                    await self.record_history(model, entry["request_time"], time.time(), int(prompt_n), int(predicted_n))
+            except Exception:
+                pass
         except Exception as e:
             if not entry["future"].done():
                 entry["future"].set_exception(e)
@@ -494,6 +568,7 @@ class LLMRouter:
             Puts None as sentinel when done.
         '''
         await self._load_lock.acquire_shared()
+        last_data = None
         try:
             port = entry["port"]
             req = entry["request"]
@@ -511,8 +586,27 @@ class LLMRouter:
                 ) as resp:
                     async for chunk in resp.aiter_bytes():
                         await queue.put(chunk)
+                        # Parse SSE lines for usage/timings data
+                        for line in chunk.decode("utf-8", errors="ignore").split("\n"):
+                            if line.startswith("data: ") and line.strip() != "data: [DONE]":
+                                try:
+                                    last_data = json.loads(line[6:])
+                                except (json.JSONDecodeError, ValueError):
+                                    pass
         except Exception as e:
             await queue.put(e)
         finally:
             queue.put_nowait(None)
             await self._load_lock.release_shared()
+            # Record history from the last SSE chunk that contained timings
+            if last_data:
+                try:
+                    timings = last_data.get("timings", {})
+                    usage = last_data.get("usage", {})
+                    prompt_n = timings.get("prompt_n", usage.get("prompt_tokens", 0))
+                    predicted_n = timings.get("predicted_n", usage.get("completion_tokens", 0))
+                    model = entry["request"].get("model", "unknown")
+                    if prompt_n or predicted_n:
+                        await self.record_history(model, entry["request_time"], time.time(), int(prompt_n), int(predicted_n))
+                except Exception:
+                    pass

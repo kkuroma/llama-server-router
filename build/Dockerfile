@@ -11,6 +11,9 @@ RUN pip3 install --no-cache-dir -r /app/requirements.txt
 COPY src/api.py /app/api.py
 COPY src/main.py /app/main.py
 COPY src/router.py /app/router.py
+COPY src/monitor.py /app/monitor.py
+COPY src/dash/ /app/dash/
+COPY src/translate/ /app/translate/
 
 WORKDIR /app
 

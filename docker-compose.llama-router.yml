@@ -1,16 +1,24 @@
 services:
   llama-server:
     build:
-      context: ./build
+      context: ./build/llama-server
       dockerfile: Dockerfile
     ports:
       - "11434:11434"
     image: llama-router
     container_name: llama-server
     restart: unless-stopped
+    environment:
+      - ROUTER_CONFIG_PATH=/configs/config.json
+      - LLAMA_PRESETS_PATH=/configs/presets.ini
+      - HISTORY_DB_PATH=/webui/monitor/history.db
+    networks:
+      - services
+      - monitoring
     volumes:
       - ./llm/models:/models:ro
       - ./llm/configs:/configs:ro
+      - ./llm/webui:/webui:rw
     deploy:
       resources:
         reservations:

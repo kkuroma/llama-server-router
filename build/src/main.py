@@ -7,10 +7,11 @@ import uvicorn
 
 import api
 from router import LLMRouter
+from monitor import GPUMonitor, StatusTimeline
+from translate.translate import TranslationService
 
-# path, move to global env later
-ROUTER_CONFIG_PATH  = "/configs/config.json"
-LLAMA_PRESETS_PATH  = "/configs/presets.ini"
+ROUTER_CONFIG_PATH  = os.environ.get("ROUTER_CONFIG_PATH", "/configs/config.json")
+LLAMA_PRESETS_PATH  = os.environ.get("LLAMA_PRESETS_PATH", "/configs/presets.ini")
 
 async def _shutdown(router: LLMRouter):
     """Best-effort cleanup: stop all child processes."""
@@ -32,8 +33,38 @@ def _print_status(router: LLMRouter):
 async def main():
     router = LLMRouter(ROUTER_CONFIG_PATH, LLAMA_PRESETS_PATH)
     await router.start()
+    await router.init_history_db()
     _print_status(router)
     api.router = router
+
+    # GPU + status monitoring
+    try:
+        gpu_monitor = GPUMonitor()
+        api.gpu_monitor = gpu_monitor
+        print("[main] GPU monitor initialized", flush=True)
+    except Exception as exc:
+        gpu_monitor = None
+        print(f"[main] GPU monitor unavailable: {exc}", flush=True)
+
+    status_timeline = StatusTimeline()
+    api.status_timeline = status_timeline
+
+    try:
+        translation_service = TranslationService()
+        api.translation_service = translation_service
+        print("[main] Translation service initialized", flush=True)
+    except Exception as exc:
+        print(f"[main] Translation service unavailable: {exc}", flush=True)
+
+    async def _monitor_loop():
+        while True:
+            if gpu_monitor:
+                await asyncio.to_thread(gpu_monitor.poll)
+            status_timeline.record(router.status.value)
+            await asyncio.sleep(1.0)
+
+    asyncio.create_task(_monitor_loop())
+
     loop = asyncio.get_event_loop()
 
     async def _signal_handler():
