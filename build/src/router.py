@@ -494,7 +494,6 @@ class LLMRouter:
                 # no requests
                 if not self.requests:
                     self._has_requests.clear()
-                    self.status = Status.IDLE
                     continue
 
                 self.status = Status.SERVING
@@ -560,6 +559,7 @@ class LLMRouter:
             if not entry["future"].done():
                 entry["future"].set_exception(e)
         finally:
+            self.status = Status.IDLE
             await self._load_lock.release_shared()
 
     async def _do_forward_streaming(self, entry, queue: asyncio.Queue):
@@ -600,6 +600,7 @@ class LLMRouter:
             await self._load_lock.release_shared()
             # Record history from the last SSE chunk that contained timings
             if last_data:
+                self.status = Status.IDLE
                 try:
                     timings = last_data.get("timings", {})
                     usage = last_data.get("usage", {})
