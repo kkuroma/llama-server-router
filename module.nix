@@ -22,8 +22,6 @@ let
     lib.optionalAttrs (cfg.presetGlobals != {}) { "*" = cfg.presetGlobals; }
     // lib.mapAttrs (_: m: removeAttrs m [ "num_instance" ]) cfg.models
   );
-
-  emb = cfg.embedding;
 in
 {
   options.services.llama-router = {
@@ -126,58 +124,6 @@ in
       };
       description = "ROUTER section of the router config (scheduler timings).";
     };
-
-    embedding = {
-      enable = lib.mkEnableOption "a standalone llama.cpp embedding server alongside the router";
-
-      host = lib.mkOption {
-        type = lib.types.str;
-        default = "127.0.0.1";
-        description = "Address the embedding server binds to.";
-      };
-
-      port = lib.mkOption {
-        type = lib.types.port;
-        default = 11435;
-        description = "Port for the embedding server.";
-      };
-
-      model = lib.mkOption {
-        type = lib.types.str;
-        example = "/data/llm-models/nomic-embed-text-v2-moe.Q4_0.gguf";
-        description = "Path to the embedding model GGUF.";
-      };
-
-      pooling = lib.mkOption {
-        type = lib.types.str;
-        default = "cls";
-        description = "Pooling mode passed to llama-server.";
-      };
-
-      ctxSize = lib.mkOption {
-        type = lib.types.int;
-        default = 2048;
-        description = "Context size for the embedding server.";
-      };
-
-      parallel = lib.mkOption {
-        type = lib.types.int;
-        default = 4;
-        description = "Number of parallel slots.";
-      };
-
-      nGpuLayers = lib.mkOption {
-        type = lib.types.int;
-        default = -1;
-        description = "GPU layers (-1 = all).";
-      };
-
-      extraFlags = lib.mkOption {
-        type = lib.types.listOf lib.types.str;
-        default = [];
-        description = "Extra flags appended to the llama-server command line.";
-      };
-    };
   };
 
   config = lib.mkIf cfg.enable {
@@ -204,25 +150,6 @@ in
         ExecStart = lib.getExe cfg.package;
         WorkingDirectory = "/var/lib/llama-router";
         StateDirectory = "llama-router";
-        User = cfg.user;
-        Group = cfg.group;
-        Restart = "on-failure";
-        RestartSec = "5s";
-      };
-    };
-
-    systemd.services.llama-embedding = lib.mkIf emb.enable {
-      description = "LLaMA.cpp Embedding Server";
-      after = [ "network.target" ];
-      wantedBy = [ "multi-user.target" ];
-      serviceConfig = {
-        ExecStart = lib.concatStringsSep " " ([
-          "${cfg.llamaCpp}/bin/llama-server"
-          "--host ${emb.host} --port ${toString emb.port}"
-          "--model ${emb.model}"
-          "--embedding --pooling ${emb.pooling}"
-          "--ctx-size ${toString emb.ctxSize} --parallel ${toString emb.parallel} --n-gpu-layers ${toString emb.nGpuLayers}"
-        ] ++ emb.extraFlags);
         User = cfg.user;
         Group = cfg.group;
         Restart = "on-failure";

@@ -7,7 +7,6 @@ plus a translation UI.
 
 - Router API on `:11434` (OpenAI-compatible, model hot-swapping)
 - Dashboard at `/` — status timeline, GPU utilization, request history
-- Optional standalone embedding server on `:11435`
 
 ## Usage as a NixOS module
 
@@ -49,12 +48,6 @@ Import `llama-router.nixosModules.default` into your host and configure:
         b = 4096;
         parallel = 4;
       };
-    };
-
-    embedding = {
-      enable = true;
-      port = 11435;
-      model = "/data/llm-models/nomic-embed-text-v2-moe.Q4_0.gguf";
     };
   };
 }
