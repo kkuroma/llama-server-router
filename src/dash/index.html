@@ -1,0 +1,788 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="mocha">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>LLaMa Router — Dashboard</title>
+  <link href="https://cdn.jsdelivr.net/npm/daisyui@4/dist/full.min.css" rel="stylesheet" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/vue@3/dist/vue.global.prod.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+  <script>
+    tailwind.config = {
+      theme: { extend: {} },
+    };
+  </script>
+  <script>
+    // Apply saved theme before first paint to avoid flash
+    (function() {
+      const saved = localStorage.getItem('llama-router-theme');
+      if (saved) document.documentElement.setAttribute('data-theme', saved);
+    })();
+  </script>
+  <style>
+    /* Catppuccin Mocha */
+    [data-theme="mocha"] {
+      --fallback-b1: #1e1e2e;
+      --fallback-b2: #181825;
+      --fallback-b3: #11111b;
+      --fallback-bc: #cdd6f4;
+      --fallback-p: #89b4fa;
+      --fallback-pc: #1e1e2e;
+      --fallback-s: #a6e3a1;
+      --fallback-sc: #1e1e2e;
+      --fallback-a: #f9e2af;
+      --fallback-ac: #1e1e2e;
+      --fallback-n: #313244;
+      --fallback-nc: #cdd6f4;
+      --fallback-in: #89dceb;
+      --fallback-inc: #1e1e2e;
+      --fallback-su: #a6e3a1;
+      --fallback-suc: #1e1e2e;
+      --fallback-wa: #f9e2af;
+      --fallback-wac: #1e1e2e;
+      --fallback-er: #f38ba8;
+      --fallback-erc: #1e1e2e;
+      color-scheme: dark;
+    }
+    /* Catppuccin Latte */
+    [data-theme="latte"] {
+      --fallback-b1: #eff1f5;
+      --fallback-b2: #e6e9ef;
+      --fallback-b3: #dce0e8;
+      --fallback-bc: #4c4f69;
+      --fallback-p: #1e66f5;
+      --fallback-pc: #eff1f5;
+      --fallback-s: #40a02b;
+      --fallback-sc: #eff1f5;
+      --fallback-a: #df8e1d;
+      --fallback-ac: #eff1f5;
+      --fallback-n: #ccd0da;
+      --fallback-nc: #4c4f69;
+      --fallback-in: #04a5e5;
+      --fallback-inc: #eff1f5;
+      --fallback-su: #40a02b;
+      --fallback-suc: #eff1f5;
+      --fallback-wa: #df8e1d;
+      --fallback-wac: #eff1f5;
+      --fallback-er: #d20f39;
+      --fallback-erc: #eff1f5;
+      color-scheme: light;
+    }
+    .chart-container { width: 100%; height: 220px; }
+    /* Softer table rows */
+    .table :where(tbody tr) { border-color: oklch(var(--b3) / 0.3); }
+    /* Subtler scrollbar */
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: oklch(var(--n)); border-radius: 3px; }
+
+    /* Navbar link styling */
+    .nav-link {
+      transition: background-color 0.15s, color 0.15s;
+      border-radius: 0.5rem;
+      padding: 0.25rem 0.75rem;
+      font-size: 0.75rem;
+      font-weight: 500;
+    }
+    [data-theme="mocha"] .nav-link {
+      color: #a6adc8;
+    }
+    [data-theme="mocha"] .nav-link:hover {
+      background-color: #313244;
+      color: #cdd6f4;
+    }
+    [data-theme="mocha"] .nav-link.active {
+      background-color: #45475a;
+      color: #cdd6f4;
+    }
+    [data-theme="latte"] .nav-link {
+      color: #6c6f85;
+    }
+    [data-theme="latte"] .nav-link:hover {
+      background-color: #ccd0da;
+      color: #4c4f69;
+    }
+    [data-theme="latte"] .nav-link.active {
+      background-color: #bcc0cc;
+      color: #4c4f69;
+    }
+
+    /* Model color dot stripe on model rows */
+    .model-row {
+      border-left: 3px solid transparent;
+    }
+  </style>
+</head>
+<body class="min-h-screen bg-base-100 text-base-content">
+  <div id="app">
+    <!-- Navbar -->
+    <div class="navbar bg-base-200/80 backdrop-blur border-b border-base-300 px-4 sticky top-0 z-50">
+      <div class="flex-1 gap-2 items-center">
+        <span class="text-base font-semibold tracking-tight opacity-90">LLaMa Router</span>
+        <div class="flex items-center gap-1.5 ml-1">
+          <span class="text-sm opacity-60">(</span>
+          <div class="w-2 h-2 rounded-full flex-shrink-0" :class="statusDotClass"></div>
+          <span class="font-mono text-sm opacity-70">{{ routerStatus }}</span>
+          <span class="text-sm opacity-60">)</span>
+        </div>
+      </div>
+      <div class="flex-none gap-1">
+        <a href="/" class="nav-link">Chat</a>
+        <a href="/dash" class="nav-link active">Dashboard</a>
+        <a href="/translate" class="nav-link">Translate</a>
+        <button class="btn btn-ghost btn-sm btn-square ml-1" @click="toggleTheme" :title="darkMode ? 'Light mode' : 'Dark mode'">
+          <svg v-if="darkMode" class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z"/></svg>
+          <svg v-else class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"/></svg>
+        </button>
+      </div>
+    </div>
+
+    <!-- Main content -->
+    <div class="flex flex-col lg:flex-row gap-4 p-4 max-w-screen-2xl mx-auto">
+
+      <!-- Left panel -->
+      <div class="w-full lg:w-[320px] flex-shrink-0 space-y-4">
+        <!-- Router controls -->
+        <div class="card bg-base-200 border border-base-300">
+          <div class="card-body p-4 gap-3">
+            <h2 class="text-xs font-semibold uppercase tracking-wider opacity-60">Router</h2>
+            <div class="flex items-center gap-2">
+              <div class="w-2 h-2 rounded-full" :class="statusDotClass"></div>
+              <span class="font-mono text-sm">{{ routerStatus }}</span>
+            </div>
+            <div class="text-xs opacity-50 font-mono" v-if="routerPorts.length">
+              ports {{ routerPorts.join(', ') }}
+            </div>
+            <div class="flex gap-2">
+              <button class="btn btn-sm flex-1"
+                :class="routerLoading === 'start' ? 'btn-disabled' : 'btn-outline btn-success'"
+                @click="routerAction('start')"
+                :disabled="!['inactive','error'].includes(routerStatus) || routerLoading">
+                <span v-if="routerLoading === 'start'" class="loading loading-spinner loading-xs"></span>
+                <span v-else>Start</span>
+              </button>
+              <button class="btn btn-sm flex-1"
+                :class="routerLoading === 'stop' ? 'btn-disabled' : 'btn-outline btn-error'"
+                @click="routerAction('stop')"
+                :disabled="['inactive','error'].includes(routerStatus) || routerLoading">
+                <span v-if="routerLoading === 'stop'" class="loading loading-spinner loading-xs"></span>
+                <span v-else>Stop</span>
+              </button>
+              <button class="btn btn-sm flex-1"
+                :class="routerLoading === 'restart' ? 'btn-disabled' : 'btn-outline btn-warning'"
+                @click="routerAction('restart')"
+                :disabled="!!routerLoading">
+                <span v-if="routerLoading === 'restart'" class="loading loading-spinner loading-xs"></span>
+                <span v-else>Restart</span>
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Models -->
+        <div class="card bg-base-200 border border-base-300">
+          <div class="card-body p-4 gap-3">
+            <h2 class="text-xs font-semibold uppercase tracking-wider opacity-60">Models</h2>
+            <div class="space-y-2">
+              <div v-for="m in models" :key="m.id"
+                class="model-row flex items-center justify-between p-2 rounded-lg bg-base-100/50"
+                :style="{ borderLeftColor: modelColor(m.id) }">
+                <div class="flex items-center gap-2 min-w-0">
+                  <div class="w-2 h-2 rounded-full flex-shrink-0"
+                    :style="{ backgroundColor: m.loaded ? modelColor(m.id) : 'transparent', border: m.loaded ? 'none' : '1.5px solid ' + modelColor(m.id), opacity: m.loaded ? 1 : 0.4 }"></div>
+                  <span class="font-mono text-xs truncate" :title="m.id" :style="{ color: modelColor(m.id) }">{{ m.id }}</span>
+                </div>
+                <button class="btn btn-xs"
+                  :style="m.loading ? {} : { borderColor: modelColor(m.id), color: modelColor(m.id), backgroundColor: 'transparent' }"
+                  :class="m.loading ? 'btn-disabled' : ''"
+                  @click="m.loaded ? unloadModel(m.id) : loadModel(m.id)"
+                  :disabled="m.loading">
+                  <span v-if="m.loading" class="loading loading-spinner loading-xs"></span>
+                  <span v-else class="text-xs">{{ m.loaded ? 'Unload' : 'Load' }}</span>
+                </button>
+              </div>
+              <div v-if="models.length === 0" class="text-xs opacity-40 text-center py-2">No models</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Right panel -->
+      <div class="flex-1 space-y-4 min-w-0">
+        <!-- GPU charts row -->
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div class="card bg-base-200 border border-base-300">
+            <div class="card-body p-4 gap-1">
+              <h2 class="text-xs font-semibold uppercase tracking-wider opacity-60">GPU Utilization</h2>
+              <div ref="gpuUtilChart" class="chart-container"></div>
+            </div>
+          </div>
+          <div class="card bg-base-200 border border-base-300">
+            <div class="card-body p-4 gap-1">
+              <h2 class="text-xs font-semibold uppercase tracking-wider opacity-60">GPU VRAM</h2>
+              <div ref="gpuVramChart" class="chart-container"></div>
+            </div>
+          </div>
+          <div class="card bg-base-200 border border-base-300">
+            <div class="card-body p-4 gap-1">
+              <h2 class="text-xs font-semibold uppercase tracking-wider opacity-60">Router Status</h2>
+              <div ref="statusChart" class="chart-container"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Request history -->
+        <div class="card bg-base-200 border border-base-300">
+          <div class="card-body p-4 gap-3">
+            <div class="flex items-center justify-between flex-wrap gap-2">
+              <h2 class="text-xs font-semibold uppercase tracking-wider opacity-60">Request History</h2>
+              <div class="flex items-center gap-2">
+                <div class="join">
+                  <button class="join-item btn btn-xs" :class="historyChartMode === 'static' ? 'btn-active' : 'btn-ghost'"
+                    @click="historyChartMode = 'static'; updateHistoryChart()">Static</button>
+                  <button class="join-item btn btn-xs" :class="historyChartMode === 'cumulative' ? 'btn-active' : 'btn-ghost'"
+                    @click="historyChartMode = 'cumulative'; updateHistoryChart()">Cumulative</button>
+                </div>
+                <select class="select select-xs select-bordered bg-base-100" v-model="historyModel" @change="fetchHistory">
+                  <option value="">All Models</option>
+                  <option v-for="m in models" :key="m.id" :value="m.id">{{ m.id }}</option>
+                </select>
+                <button class="btn btn-xs btn-ghost opacity-60 hover:opacity-100" @click="resetHistory" title="Clear history">
+                  <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
+                </button>
+              </div>
+            </div>
+            <div ref="historyChart" class="chart-container"></div>
+            <div class="overflow-x-auto max-h-60 overflow-y-auto">
+              <table class="table table-xs table-pin-rows">
+                <thead>
+                  <tr class="text-xs opacity-60">
+                    <th class="cursor-pointer select-none" @click="sortHistory('model')">
+                      Model <span v-if="historySort.key==='model'" class="opacity-40">{{ historySort.asc ? '▲' : '▼' }}</span>
+                    </th>
+                    <th class="cursor-pointer select-none" @click="sortHistory('request_time')">
+                      Request time <span v-if="historySort.key==='request_time'" class="opacity-40">{{ historySort.asc ? '▲' : '▼' }}</span>
+                    </th>
+                    <th class="cursor-pointer select-none" @click="sortHistory('response_time')">
+                      Responded time <span v-if="historySort.key==='response_time'" class="opacity-40">{{ historySort.asc ? '▲' : '▼' }}</span>
+                    </th>
+                    <th class="cursor-pointer select-none" @click="sortHistory('duration')">
+                      Duration <span v-if="historySort.key==='duration'" class="opacity-40">{{ historySort.asc ? '▲' : '▼' }}</span>
+                    </th>
+                    <th class="cursor-pointer select-none" @click="sortHistory('prompt_n')">
+                      Prompt <span v-if="historySort.key==='prompt_n'" class="opacity-40">{{ historySort.asc ? '▲' : '▼' }}</span>
+                    </th>
+                    <th class="cursor-pointer select-none" @click="sortHistory('predicted_n')">
+                      Predicted <span v-if="historySort.key==='predicted_n'" class="opacity-40">{{ historySort.asc ? '▲' : '▼' }}</span>
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="h in sortedHistory" :key="h.id" class="hover"
+                    :style="{ borderLeft: '3px solid ' + modelColor(h.model) }">
+                    <td class="font-mono text-xs max-w-[120px] truncate" :style="{ color: modelColor(h.model) }">{{ h.model }}</td>
+                    <td class="text-xs opacity-70 whitespace-nowrap">{{ formatTime(h.request_time) }}</td>
+                    <td class="text-xs opacity-70 whitespace-nowrap">{{ formatTime(h.response_time) }}</td>
+                    <td class="text-xs font-mono opacity-70">{{ (h.response_time - h.request_time).toFixed(1) }}s</td>
+                    <td class="text-xs font-mono">{{ h.prompt_n.toLocaleString() }}</td>
+                    <td class="text-xs font-mono">{{ h.predicted_n.toLocaleString() }}</td>
+                  </tr>
+                  <tr v-if="history.length === 0">
+                    <td colspan="6" class="text-center opacity-30 py-4">No requests recorded</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // Catppuccin palette refs for charts
+    const CTP = {
+      mocha: {
+        text: '#cdd6f4', subtext: '#a6adc8', surface0: '#313244', surface1: '#45475a',
+        overlay0: '#6c7086', base: '#1e1e2e', mantle: '#181825', crust: '#11111b',
+        blue: '#89b4fa', green: '#a6e3a1', red: '#f38ba8', yellow: '#f9e2af',
+        mauve: '#cba6f7', teal: '#94e2d5', peach: '#fab387', lavender: '#b4befe',
+        sapphire: '#74c7ec', sky: '#89dceb', pink: '#f5c2e7', flamingo: '#f2cdcd',
+        rosewater: '#f5e0dc', maroon: '#eba0ac',
+      },
+      latte: {
+        text: '#4c4f69', subtext: '#6c6f85', surface0: '#ccd0da', surface1: '#bcc0cc',
+        overlay0: '#7c7f93', base: '#eff1f5', mantle: '#e6e9ef', crust: '#dce0e8',
+        blue: '#1e66f5', green: '#40a02b', red: '#d20f39', yellow: '#df8e1d',
+        mauve: '#8839ef', teal: '#179299', peach: '#fe640b', lavender: '#7287fd',
+        sapphire: '#209fb5', sky: '#04a5e5', pink: '#ea76cb', flamingo: '#dd7878',
+        rosewater: '#dc8a78', maroon: '#e64553',
+      },
+    };
+
+    // Color palette for model color-coding (cycles through these)
+    const MODEL_COLOR_KEYS = ['blue', 'green', 'mauve', 'peach', 'teal', 'pink', 'sapphire', 'yellow', 'lavender', 'flamingo', 'sky', 'maroon', 'rosewater', 'red'];
+
+    const STATUS_COLORS_MOCHA = {
+      idle: '#89b4fa', serving: '#a6e3a1', starting: '#f9e2af',
+      stopping: '#fab387', inactive: '#45475a', error: '#f38ba8',
+    };
+    const STATUS_COLORS_LATTE = {
+      idle: '#1e66f5', serving: '#40a02b', starting: '#df8e1d',
+      stopping: '#fe640b', inactive: '#bcc0cc', error: '#d20f39',
+    };
+
+    const { createApp, ref, reactive, computed, onMounted, onUnmounted, nextTick } = Vue;
+
+    createApp({
+      setup() {
+        const savedTheme = localStorage.getItem('llama-router-theme');
+        const darkMode = ref(savedTheme ? savedTheme === 'mocha' : true);
+        const routerStatus = ref('unknown');
+        const routerPorts = ref([]);
+        const routerLoading = ref(null); // 'start' | 'stop' | 'restart' | null
+        const models = ref([]);
+        const history = ref([]);
+        const historyModel = ref('');
+        const historySort = ref({ key: 'request_time', asc: false });
+        const historyChartMode = ref('static');
+        const loadingModels = reactive({});
+
+        const gpuUtilChart = ref(null);
+        const gpuVramChart = ref(null);
+        const statusChart = ref(null);
+        const historyChart = ref(null);
+
+        let utilChart = null, vramChart = null, stsChart = null, hstChart = null;
+        let pollTimer = null;
+
+        // Track model IDs to assign stable colors
+        const modelColorMap = reactive({});
+        let modelColorIdx = 0;
+
+        const pal = () => darkMode.value ? CTP.mocha : CTP.latte;
+        const statusColors = () => darkMode.value ? STATUS_COLORS_MOCHA : STATUS_COLORS_LATTE;
+
+        function modelColor(modelId) {
+          if (!modelColorMap[modelId]) {
+            const key = MODEL_COLOR_KEYS[modelColorIdx % MODEL_COLOR_KEYS.length];
+            modelColorIdx++;
+            modelColorMap[modelId] = key;
+          }
+          return pal()[modelColorMap[modelId]];
+        }
+
+        const statusColor = computed(() => {
+          const map = {
+            idle: 'badge-info', serving: 'badge-success', starting: 'badge-warning',
+            stopping: 'badge-warning', inactive: 'badge-ghost', error: 'badge-error',
+          };
+          return map[routerStatus.value] || 'badge-ghost';
+        });
+
+        const statusDotClass = computed(() => {
+          const map = {
+            idle: 'bg-info', serving: 'bg-success animate-pulse', starting: 'bg-warning animate-pulse',
+            stopping: 'bg-warning', inactive: 'bg-base-content/20', error: 'bg-error animate-pulse',
+          };
+          return map[routerStatus.value] || 'bg-base-content/20';
+        });
+
+        const sortedHistory = computed(() => {
+          const arr = [...history.value];
+          const { key, asc } = historySort.value;
+          arr.sort((a, b) => {
+            let va, vb;
+            if (key === 'duration') {
+              va = a.response_time - a.request_time;
+              vb = b.response_time - b.request_time;
+            } else {
+              va = a[key];
+              vb = b[key];
+            }
+            if (typeof va === 'string') return asc ? va.localeCompare(vb) : vb.localeCompare(va);
+            return asc ? va - vb : vb - va;
+          });
+          return arr;
+        });
+
+        function toggleTheme() {
+          darkMode.value = !darkMode.value;
+          const theme = darkMode.value ? 'mocha' : 'latte';
+          document.documentElement.setAttribute('data-theme', theme);
+          localStorage.setItem('llama-router-theme', theme);
+          rebuildCharts();
+        }
+
+        function formatTime(ts) {
+          const d = new Date(ts * 1000);
+          return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+        }
+
+        // --- Data fetching ---
+        async function fetchStatus() {
+          try {
+            const data = await (await fetch('/router')).json();
+            routerStatus.value = data.status;
+            routerPorts.value = data.ports || [];
+          } catch {}
+        }
+
+        async function fetchModels() {
+          try {
+            const data = await (await fetch('/router/models')).json();
+            const list = data.data || data.models || [];
+            models.value = list.map(m => ({
+              id: m.id,
+              loaded: m.status?.value === 'loaded',
+              args: m.status?.args || [],
+              loading: !!loadingModels[m.id],
+            }));
+            // Pre-assign colors for all models
+            for (const m of models.value) {
+              modelColor(m.id);
+            }
+          } catch {}
+        }
+
+        async function fetchHistory() {
+          try {
+            const url = historyModel.value
+              ? `/router/history?model=${encodeURIComponent(historyModel.value)}`
+              : '/router/history';
+            history.value = await (await fetch(url)).json();
+            updateHistoryChart();
+          } catch {}
+        }
+
+        async function routerAction(action) {
+          routerLoading.value = action;
+          try { await fetch(`/router/${action}`); } catch {}
+          await fetchStatus();
+          await fetchModels();
+          routerLoading.value = null;
+        }
+
+        async function loadModel(modelId) {
+          loadingModels[modelId] = true;
+          const m = models.value.find(x => x.id === modelId);
+          if (m) m.loading = true;
+          try {
+            await fetch('/models/load', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ model: modelId }),
+            });
+          } catch {}
+          delete loadingModels[modelId];
+          await fetchModels();
+        }
+
+        async function unloadModel(modelId) {
+          loadingModels[modelId] = true;
+          const m = models.value.find(x => x.id === modelId);
+          if (m) m.loading = true;
+          try {
+            await fetch('/models/unload', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ model: modelId }),
+            });
+          } catch {}
+          delete loadingModels[modelId];
+          await fetchModels();
+        }
+
+        async function resetHistory() {
+          await fetch('/router/reset_history');
+          await fetchHistory();
+        }
+
+        function sortHistory(key) {
+          if (historySort.value.key === key) {
+            historySort.value.asc = !historySort.value.asc;
+          } else {
+            historySort.value = { key, asc: true };
+          }
+        }
+
+        // --- Charts ---
+        function baseOpts() {
+          const p = pal();
+          return {
+            animation: false,
+            textStyle: { color: p.subtext, fontFamily: 'ui-monospace, monospace', fontSize: 10 },
+            grid: { top: 8, right: 12, bottom: 28, left: 48, containLabel: false },
+            tooltip: {
+              backgroundColor: p.surface0, borderColor: p.surface1, borderWidth: 1,
+              textStyle: { color: p.text, fontSize: 11 },
+            },
+            xAxis: {
+              type: 'time',
+              axisLine: { lineStyle: { color: p.surface1 } },
+              axisTick: { show: false },
+              axisLabel: { color: p.overlay0, fontSize: 9, formatter: '{HH}:{mm}' },
+              splitLine: { show: false },
+            },
+          };
+        }
+
+        function areaGradient(color, topAlpha, botAlpha) {
+          return new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+            { offset: 0, color: color + topAlpha },
+            { offset: 1, color: color + botAlpha },
+          ]);
+        }
+
+        function initCharts() {
+          utilChart = echarts.init(gpuUtilChart.value, null, { renderer: 'canvas' });
+          vramChart = echarts.init(gpuVramChart.value, null, { renderer: 'canvas' });
+          stsChart  = echarts.init(statusChart.value,  null, { renderer: 'canvas' });
+          hstChart  = echarts.init(historyChart.value,  null, { renderer: 'canvas' });
+          updateGpuCharts({ util_history: [], vram_history: [], total_vram_mb: 0 });
+          updateStatusChart({ entries: [] });
+          updateHistoryChart();
+        }
+
+        function rebuildCharts() {
+          [utilChart, vramChart, stsChart, hstChart].forEach(c => c?.dispose());
+          nextTick(async () => {
+            initCharts();
+            await Promise.all([fetchGpu(), fetchTimeline(), fetchHistory()]);
+          });
+        }
+
+        async function fetchGpu() {
+          try {
+            const data = await (await fetch('/router/gpu')).json();
+            if (!data.error) updateGpuCharts(data);
+          } catch {}
+        }
+
+        async function fetchTimeline() {
+          try {
+            const data = await (await fetch('/router/status_timeline')).json();
+            updateStatusChart(data);
+          } catch {}
+        }
+
+        function updateGpuCharts(data) {
+          if (!utilChart || !vramChart) return;
+          const p = pal();
+
+          utilChart.setOption({
+            ...baseOpts(),
+            tooltip: { ...baseOpts().tooltip, trigger: 'axis',
+              formatter: params => `${new Date(params[0].value[0]).toLocaleTimeString()}<br/>GPU: ${params[0].value[1]}%` },
+            yAxis: {
+              type: 'value', min: 0, max: 100,
+              axisLabel: { color: p.overlay0, fontSize: 9, formatter: '{value}%' },
+              splitLine: { lineStyle: { color: p.surface0, type: 'dashed' } },
+              axisLine: { show: false }, axisTick: { show: false },
+            },
+            series: [{
+              type: 'line', showSymbol: false, smooth: 0.3, lineStyle: { color: p.blue, width: 1.5 },
+              areaStyle: { color: areaGradient(p.blue, '30', '05') },
+              data: (data.util_history || []).map(([t, v]) => [t * 1000, v]),
+            }],
+          });
+
+          const totalVram = data.total_vram_mb || 1;
+          vramChart.setOption({
+            ...baseOpts(),
+            tooltip: { ...baseOpts().tooltip, trigger: 'axis',
+              formatter: params => {
+                const v = params[0].value[1];
+                return `${new Date(params[0].value[0]).toLocaleTimeString()}<br/>VRAM: ${(v/1024).toFixed(1)} GB / ${(totalVram/1024).toFixed(1)} GB`;
+              }},
+            yAxis: {
+              type: 'value', min: 0, max: Math.ceil(totalVram),
+              axisLabel: { color: p.overlay0, fontSize: 9, formatter: v => `${(v/1024).toFixed(0)}G` },
+              splitLine: { lineStyle: { color: p.surface0, type: 'dashed' } },
+              axisLine: { show: false }, axisTick: { show: false },
+            },
+            series: [{
+              type: 'line', showSymbol: false, smooth: 0.3, lineStyle: { color: p.teal, width: 1.5 },
+              areaStyle: { color: areaGradient(p.teal, '30', '05') },
+              data: (data.vram_history || []).map(([t, v]) => [t * 1000, v]),
+              markLine: {
+                silent: true, symbol: 'none',
+                data: [{ yAxis: totalVram, lineStyle: { color: p.red, type: 'dashed', width: 1, opacity: 0.5 } }],
+                label: { show: false },
+              },
+            }],
+          });
+        }
+
+        function updateStatusChart(data) {
+          if (!stsChart) return;
+          const p = pal();
+          const sc = statusColors();
+          const entries = data.entries || [];
+          const now = Date.now();
+          const segments = [];
+          for (let i = 0; i < entries.length; i++) {
+            const [ts, status] = entries[i];
+            const start = ts * 1000;
+            const end = i + 1 < entries.length ? entries[i + 1][0] * 1000 : now;
+            segments.push({
+              value: [start, 0, end, status],
+              itemStyle: { color: sc[status] || p.surface1 },
+            });
+          }
+
+          stsChart.setOption({
+            animation: false,
+            textStyle: { color: p.subtext, fontFamily: 'ui-monospace, monospace', fontSize: 10 },
+            grid: { top: 8, right: 12, bottom: 28, left: 48 },
+            xAxis: {
+              type: 'time',
+              axisLine: { lineStyle: { color: p.surface1 } },
+              axisTick: { show: false },
+              axisLabel: { color: p.overlay0, fontSize: 9, formatter: '{HH}:{mm}' },
+              splitLine: { show: false },
+            },
+            yAxis: { show: false, min: -1, max: 1 },
+            tooltip: {
+              backgroundColor: p.surface0, borderColor: p.surface1, borderWidth: 1,
+              textStyle: { color: p.text, fontSize: 11 },
+              formatter: params => {
+                const d = params.data.value;
+                const s = new Date(d[0]).toLocaleTimeString();
+                const e = new Date(d[2]).toLocaleTimeString();
+                return `<span style="color:${sc[d[3]] || p.text}">${d[3]}</span><br/>${s} — ${e}`;
+              },
+            },
+            series: [{
+              type: 'custom',
+              renderItem: (params, api) => {
+                const start = api.coord([api.value(0), 0]);
+                const end = api.coord([api.value(2), 0]);
+                const h = api.size([0, 1])[1] * 0.5;
+                const r = Math.min(4, (end[0] - start[0]) / 2);
+                return {
+                  type: 'rect',
+                  shape: { x: start[0], y: start[1] - h / 2, width: Math.max(end[0] - start[0], 2), height: h, r },
+                  style: { fill: api.visual('color') },
+                };
+              },
+              encode: { x: [0, 2], y: 1 },
+              data: segments,
+            }],
+          });
+        }
+
+        function updateHistoryChart() {
+          if (!hstChart) return;
+          const p = pal();
+          const h = history.value;
+
+          if (historyChartMode.value === 'cumulative') {
+            const sorted = [...h].sort((a, b) => a.request_time - b.request_time);
+            let cumPrompt = 0, cumPredicted = 0;
+            const promptData = [], predictedData = [];
+            for (const item of sorted) {
+              cumPrompt += item.prompt_n;
+              cumPredicted += item.predicted_n;
+              const t = item.request_time * 1000;
+              promptData.push([t, cumPrompt]);
+              predictedData.push([t, cumPredicted]);
+            }
+
+            hstChart.setOption({
+              ...baseOpts(),
+              tooltip: { ...baseOpts().tooltip, trigger: 'axis' },
+              legend: {
+                data: ['Prompt', 'Predicted'], bottom: 0,
+                textStyle: { color: p.overlay0, fontSize: 10 },
+                icon: 'roundRect', itemWidth: 10, itemHeight: 6,
+              },
+              grid: { top: 8, right: 12, bottom: 36, left: 48 },
+              yAxis: {
+                type: 'value',
+                axisLabel: { color: p.overlay0, fontSize: 9 },
+                splitLine: { lineStyle: { color: p.surface0, type: 'dashed' } },
+                axisLine: { show: false }, axisTick: { show: false },
+              },
+              series: [
+                {
+                  name: 'Prompt', type: 'line', stack: 'cumulative', showSymbol: false, smooth: 0.2,
+                  lineStyle: { color: p.blue, width: 1.5 },
+                  areaStyle: { color: areaGradient(p.blue, '35', '08') },
+                  data: promptData,
+                },
+                {
+                  name: 'Predicted', type: 'line', stack: 'cumulative', showSymbol: false, smooth: 0.2,
+                  lineStyle: { color: p.green, width: 1.5 },
+                  areaStyle: { color: areaGradient(p.green, '25', '05') },
+                  data: predictedData,
+                },
+              ],
+            }, true);
+          } else {
+            hstChart.setOption({
+              ...baseOpts(),
+              tooltip: { ...baseOpts().tooltip, trigger: 'axis' },
+              legend: {
+                data: ['Prompt', 'Predicted'], bottom: 0,
+                textStyle: { color: p.overlay0, fontSize: 10 },
+                icon: 'roundRect', itemWidth: 10, itemHeight: 6,
+              },
+              grid: { top: 8, right: 12, bottom: 36, left: 48 },
+              yAxis: {
+                type: 'value',
+                axisLabel: { color: p.overlay0, fontSize: 9 },
+                splitLine: { lineStyle: { color: p.surface0, type: 'dashed' } },
+                axisLine: { show: false }, axisTick: { show: false },
+              },
+              series: [
+                {
+                  name: 'Prompt', type: 'bar', stack: 'tokens',
+                  itemStyle: { color: p.blue, borderRadius: [0, 0, 0, 0] },
+                  barMaxWidth: 20,
+                  data: h.map(x => [x.request_time * 1000, x.prompt_n]),
+                },
+                {
+                  name: 'Predicted', type: 'bar', stack: 'tokens',
+                  itemStyle: { color: p.green, borderRadius: [2, 2, 0, 0] },
+                  barMaxWidth: 20,
+                  data: h.map(x => [x.request_time * 1000, x.predicted_n]),
+                },
+              ],
+            }, true);
+          }
+        }
+
+        // --- Polling ---
+        async function pollAll() {
+          await Promise.all([fetchStatus(), fetchModels(), fetchGpu(), fetchTimeline(), fetchHistory()]);
+        }
+
+        onMounted(async () => {
+          await nextTick();
+          initCharts();
+          await pollAll();
+          pollTimer = setInterval(pollAll, 5000);
+          window.addEventListener('resize', () => {
+            [utilChart, vramChart, stsChart, hstChart].forEach(c => c?.resize());
+          });
+        });
+
+        onUnmounted(() => {
+          clearInterval(pollTimer);
+          [utilChart, vramChart, stsChart, hstChart].forEach(c => c?.dispose());
+        });
+
+        return {
+          darkMode, routerStatus, routerPorts, routerLoading, models, history, historyModel,
+          historySort, historyChartMode, statusColor, statusDotClass, sortedHistory,
+          toggleTheme, formatTime, fetchHistory, routerAction, modelColor,
+          loadModel, unloadModel, resetHistory, sortHistory, updateHistoryChart,
+          gpuUtilChart, gpuVramChart, statusChart, historyChart,
+        };
+      },
+    }).mount('#app');
+  </script>
+</body>
+</html>

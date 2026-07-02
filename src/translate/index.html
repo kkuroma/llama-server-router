@@ -1,0 +1,465 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="mocha">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>LLaMa Router — Translate</title>
+  <link href="https://cdn.jsdelivr.net/npm/daisyui@4/dist/full.min.css" rel="stylesheet" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/vue@3/dist/vue.global.prod.js"></script>
+  <script>
+    tailwind.config = {
+      theme: { extend: {} },
+    };
+  </script>
+  <style>
+    /* Catppuccin Mocha */
+    [data-theme="mocha"] {
+      --fallback-b1: #1e1e2e;
+      --fallback-b2: #181825;
+      --fallback-b3: #11111b;
+      --fallback-bc: #cdd6f4;
+      --fallback-p: #89b4fa;
+      --fallback-pc: #1e1e2e;
+      --fallback-s: #a6e3a1;
+      --fallback-sc: #1e1e2e;
+      --fallback-a: #f9e2af;
+      --fallback-ac: #1e1e2e;
+      --fallback-n: #313244;
+      --fallback-nc: #cdd6f4;
+      --fallback-in: #89dceb;
+      --fallback-inc: #1e1e2e;
+      --fallback-su: #a6e3a1;
+      --fallback-suc: #1e1e2e;
+      --fallback-wa: #f9e2af;
+      --fallback-wac: #1e1e2e;
+      --fallback-er: #f38ba8;
+      --fallback-erc: #1e1e2e;
+      color-scheme: dark;
+    }
+    /* Catppuccin Latte */
+    [data-theme="latte"] {
+      --fallback-b1: #eff1f5;
+      --fallback-b2: #e6e9ef;
+      --fallback-b3: #dce0e8;
+      --fallback-bc: #4c4f69;
+      --fallback-p: #1e66f5;
+      --fallback-pc: #eff1f5;
+      --fallback-s: #40a02b;
+      --fallback-sc: #eff1f5;
+      --fallback-a: #df8e1d;
+      --fallback-ac: #eff1f5;
+      --fallback-n: #ccd0da;
+      --fallback-nc: #4c4f69;
+      --fallback-in: #04a5e5;
+      --fallback-inc: #eff1f5;
+      --fallback-su: #40a02b;
+      --fallback-suc: #eff1f5;
+      --fallback-wa: #df8e1d;
+      --fallback-wac: #eff1f5;
+      --fallback-er: #d20f39;
+      --fallback-erc: #eff1f5;
+      color-scheme: light;
+    }
+    /* Subtler scrollbar */
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: oklch(var(--n)); border-radius: 3px; }
+
+    /* Navbar link styling */
+    .nav-link {
+      transition: background-color 0.15s, color 0.15s;
+      border-radius: 0.5rem;
+      padding: 0.25rem 0.75rem;
+      font-size: 0.75rem;
+      font-weight: 500;
+    }
+    [data-theme="mocha"] .nav-link { color: #a6adc8; }
+    [data-theme="mocha"] .nav-link:hover { background-color: #313244; color: #cdd6f4; }
+    [data-theme="mocha"] .nav-link.active { background-color: #45475a; color: #cdd6f4; }
+    [data-theme="latte"] .nav-link { color: #6c6f85; }
+    [data-theme="latte"] .nav-link:hover { background-color: #ccd0da; color: #4c4f69; }
+    [data-theme="latte"] .nav-link.active { background-color: #bcc0cc; color: #4c4f69; }
+  </style>
+  <script>
+    // Apply saved theme before first paint to avoid flash
+    (function() {
+      const saved = localStorage.getItem('llama-router-theme');
+      if (saved) document.documentElement.setAttribute('data-theme', saved);
+    })();
+  </script>
+</head>
+<body class="min-h-screen bg-base-100 text-base-content">
+  <div id="app">
+    <!-- Navbar -->
+    <div class="navbar bg-base-200/80 backdrop-blur border-b border-base-300 px-4 sticky top-0 z-50">
+      <div class="flex-1 gap-2 items-center">
+        <span class="text-base font-semibold tracking-tight opacity-90">LLaMa Router</span>
+        <div class="flex items-center gap-1.5 ml-1">
+          <span class="text-sm opacity-60">(</span>
+          <div class="w-2 h-2 rounded-full flex-shrink-0" :class="statusDotClass"></div>
+          <span class="font-mono text-sm opacity-70">{{ routerStatus }}</span>
+          <span class="text-sm opacity-60">)</span>
+        </div>
+      </div>
+      <div class="flex-none gap-1">
+        <a href="/" class="nav-link">Chat</a>
+        <a href="/dash" class="nav-link">Dashboard</a>
+        <a href="/translate" class="nav-link active">Translate</a>
+        <button class="btn btn-ghost btn-sm btn-square ml-1" @click="toggleTheme" :title="darkMode ? 'Light mode' : 'Dark mode'">
+          <svg v-if="darkMode" class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z"/></svg>
+          <svg v-else class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"/></svg>
+        </button>
+      </div>
+    </div>
+
+    <!-- Main content -->
+    <div class="max-w-screen-xl mx-auto p-4 space-y-4">
+
+      <!-- Controls row -->
+      <div class="card bg-base-200 border border-base-300">
+        <div class="card-body p-4 gap-3">
+          <!-- Model selector -->
+          <div class="flex items-center gap-3 flex-wrap">
+            <label class="text-xs font-semibold uppercase tracking-wider w-16 flex-shrink-0"
+              style="color: var(--fallback-p)">Model</label>
+            <select class="select select-sm select-bordered bg-base-100 flex-1 max-w-xs font-mono text-xs"
+              style="border-color: var(--fallback-p)"
+              v-model="selectedModel">
+              <option value="" disabled>Select a model</option>
+              <option v-for="m in models" :key="m.id" :value="m.id">{{ m.id }}</option>
+            </select>
+          </div>
+
+          <!-- Source language -->
+          <div class="flex items-center gap-3 flex-wrap">
+            <label class="text-xs font-semibold uppercase tracking-wider w-16 flex-shrink-0"
+              style="color: var(--fallback-in)">Source</label>
+            <select class="select select-sm select-bordered bg-base-100 max-w-[180px] font-mono text-xs"
+              style="border-color: var(--fallback-in)"
+              v-model="sourceLang" @change="onSourceLangChange">
+              <option value="" disabled>Language</option>
+              <option v-for="name in languageNames" :key="name" :value="name">{{ name }}</option>
+            </select>
+            <select v-if="sourceVariants.length > 1"
+              class="select select-sm select-bordered bg-base-100 max-w-[180px] font-mono text-xs"
+              style="border-color: var(--fallback-in)"
+              v-model="sourceId">
+              <option v-for="v in sourceVariants" :key="v.lang_id" :value="v.lang_id">{{ v.lang_id }}</option>
+            </select>
+            <span v-else-if="sourceId" class="font-mono text-xs opacity-50">{{ sourceId }}</span>
+
+            <!-- Swap button -->
+            <button class="btn btn-ghost btn-xs btn-square opacity-50 hover:opacity-100"
+              style="color: var(--fallback-a)"
+              @click="swapLanguages" title="Swap languages">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4"/></svg>
+            </button>
+
+            <!-- Target language -->
+            <label class="text-xs font-semibold uppercase tracking-wider w-16 flex-shrink-0"
+              style="color: var(--fallback-s)">Target</label>
+            <select class="select select-sm select-bordered bg-base-100 max-w-[180px] font-mono text-xs"
+              style="border-color: var(--fallback-s)"
+              v-model="targetLang" @change="onTargetLangChange">
+              <option value="" disabled>Language</option>
+              <option v-for="name in languageNames" :key="name" :value="name">{{ name }}</option>
+            </select>
+            <select v-if="targetVariants.length > 1"
+              class="select select-sm select-bordered bg-base-100 max-w-[180px] font-mono text-xs"
+              style="border-color: var(--fallback-s)"
+              v-model="targetId">
+              <option v-for="v in targetVariants" :key="v.lang_id" :value="v.lang_id">{{ v.lang_id }}</option>
+            </select>
+            <span v-else-if="targetId" class="font-mono text-xs opacity-50">{{ targetId }}</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Additional requests -->
+      <div class="card bg-base-200 border border-base-300">
+        <div class="card-body p-4 gap-2">
+          <label class="text-xs font-semibold uppercase tracking-wider"
+            style="color: var(--fallback-a)">Additional requests
+            <span class="opacity-40 normal-case">(optional)</span></label>
+          <input type="text" class="input input-sm input-bordered bg-base-100 w-full text-sm font-mono"
+            style="border-color: var(--fallback-a)"
+            v-model="additionals"
+            placeholder="e.g. make the translation more archaic, use formal register..." />
+        </div>
+      </div>
+
+      <!-- Translation area -->
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <!-- Source text -->
+        <div class="card bg-base-200 border border-base-300" style="border-left: 3px solid var(--fallback-in)">
+          <div class="card-body p-4 gap-2">
+            <div class="flex items-center justify-between">
+              <label class="text-xs font-semibold uppercase tracking-wider" style="color: var(--fallback-in)">Source text</label>
+              <span class="text-xs opacity-40 font-mono" v-if="sourceText.length">{{ sourceText.length }} chars</span>
+            </div>
+            <textarea class="textarea textarea-bordered bg-base-100 w-full text-sm leading-relaxed"
+              rows="12"
+              v-model="sourceText"
+              placeholder="Enter text to translate..."
+              @keydown.ctrl.enter="translate"></textarea>
+            <div class="flex justify-end">
+              <button class="btn btn-sm gap-2"
+                style="background-color: var(--fallback-p); color: var(--fallback-pc); border: none;"
+                @click="translate"
+                :disabled="!canTranslate || translating">
+                <span v-if="translating" class="loading loading-spinner loading-xs"></span>
+                <span>{{ translating ? 'Translating...' : 'Translate' }}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Output -->
+        <div class="card bg-base-200 border border-base-300" style="border-left: 3px solid var(--fallback-s)">
+          <div class="card-body p-4 gap-2">
+            <div class="flex items-center justify-between">
+              <label class="text-xs font-semibold uppercase tracking-wider" style="color: var(--fallback-s)">Translation</label>
+              <span class="text-xs opacity-40 font-mono" v-if="outputText.length">{{ outputText.length }} chars</span>
+            </div>
+            <textarea class="textarea textarea-bordered bg-base-100 w-full text-sm leading-relaxed"
+              rows="12"
+              :value="outputText"
+              readonly
+              placeholder="Translation will appear here..."></textarea>
+            <div class="flex justify-end">
+              <button class="btn btn-sm btn-ghost btn-xs opacity-50 hover:opacity-100"
+                style="color: var(--fallback-s)"
+                @click="copyOutput"
+                :disabled="!outputText"
+                title="Copy to clipboard">
+                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"/></svg>
+                <span class="text-xs ml-1">{{ copied ? 'Copied!' : 'Copy' }}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Error display -->
+      <div v-if="errorMsg" class="alert alert-error text-sm">
+        <svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M12 9v2m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+        <span>{{ errorMsg }}</span>
+        <button class="btn btn-ghost btn-xs" @click="errorMsg = ''">Dismiss</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const { createApp, ref, computed, watch, onMounted } = Vue;
+
+    createApp({
+      setup() {
+        // Theme: read from localStorage, default to mocha
+        const savedTheme = localStorage.getItem('llama-router-theme');
+        const darkMode = ref(savedTheme ? savedTheme === 'mocha' : true);
+
+        const routerStatus = ref('unknown');
+        const models = ref([]);
+        const languages = ref([]);
+        const selectedModel = ref('');
+        const sourceLang = ref('');
+        const sourceId = ref('');
+        const targetLang = ref('');
+        const targetId = ref('');
+        const sourceText = ref('');
+        const additionals = ref('');
+        const outputText = ref('');
+        const translating = ref(false);
+        const errorMsg = ref('');
+        const copied = ref(false);
+
+        const statusDotClass = computed(() => {
+          const map = {
+            idle: 'bg-info', serving: 'bg-success animate-pulse', starting: 'bg-warning animate-pulse',
+            stopping: 'bg-warning', inactive: 'bg-base-content/20', error: 'bg-error animate-pulse',
+          };
+          return map[routerStatus.value] || 'bg-base-content/20';
+        });
+
+        // Build unique language names (sorted)
+        const languageNames = computed(() => {
+          const names = new Set();
+          for (const l of languages.value) names.add(l.lang_name);
+          return [...names].sort();
+        });
+
+        // Variants for the currently selected source language name
+        const sourceVariants = computed(() => {
+          if (!sourceLang.value) return [];
+          return languages.value.filter(l => l.lang_name === sourceLang.value);
+        });
+
+        // Variants for the currently selected target language name
+        const targetVariants = computed(() => {
+          if (!targetLang.value) return [];
+          return languages.value.filter(l => l.lang_name === targetLang.value);
+        });
+
+        const canTranslate = computed(() => {
+          return selectedModel.value && sourceId.value && targetId.value && sourceText.value.trim();
+        });
+
+        function onSourceLangChange() {
+          const variants = languages.value.filter(l => l.lang_name === sourceLang.value);
+          sourceId.value = variants.length ? variants[0].lang_id : '';
+        }
+
+        function onTargetLangChange() {
+          const variants = languages.value.filter(l => l.lang_name === targetLang.value);
+          targetId.value = variants.length ? variants[0].lang_id : '';
+        }
+
+        function toggleTheme() {
+          darkMode.value = !darkMode.value;
+          const theme = darkMode.value ? 'mocha' : 'latte';
+          document.documentElement.setAttribute('data-theme', theme);
+          localStorage.setItem('llama-router-theme', theme);
+        }
+
+        function swapLanguages() {
+          const tmpLang = sourceLang.value;
+          const tmpId = sourceId.value;
+          sourceLang.value = targetLang.value;
+          sourceId.value = targetId.value;
+          targetLang.value = tmpLang;
+          targetId.value = tmpId;
+        }
+
+        async function fetchStatus() {
+          try {
+            const data = await (await fetch('/router')).json();
+            routerStatus.value = data.status;
+          } catch {}
+        }
+
+        async function fetchModels() {
+          try {
+            const data = await (await fetch('/router/models')).json();
+            const list = data.data || data.models || [];
+            models.value = list.map(m => ({
+              id: m.id,
+              loaded: m.status?.value === 'loaded',
+            }));
+            // Auto-select first loaded model if nothing selected
+            if (!selectedModel.value) {
+              const loaded = models.value.find(m => m.loaded);
+              if (loaded) selectedModel.value = loaded.id;
+            }
+          } catch {}
+        }
+
+        async function fetchLanguages() {
+          try {
+            languages.value = await (await fetch('/router/languages')).json();
+            // Preselect English / en-US for source
+            if (!sourceLang.value && languages.value.length) {
+              const hasEnglish = languages.value.some(l => l.lang_name === 'English');
+              if (hasEnglish) {
+                sourceLang.value = 'English';
+                const enUS = languages.value.find(l => l.lang_id === 'en-US');
+                sourceId.value = enUS ? 'en-US' : languages.value.find(l => l.lang_name === 'English').lang_id;
+              }
+            }
+          } catch {}
+        }
+
+        async function translate() {
+          if (!canTranslate.value || translating.value) return;
+
+          translating.value = true;
+          outputText.value = '';
+          errorMsg.value = '';
+
+          try {
+            const resp = await fetch('/router/translate', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                model_id: selectedModel.value,
+                source_id: sourceId.value,
+                target_id: targetId.value,
+                text: sourceText.value,
+                additionals: additionals.value,
+                stream: true,
+              }),
+            });
+
+            if (!resp.ok) {
+              const err = await resp.json().catch(() => ({}));
+              errorMsg.value = err.detail || err.error?.message || `Error ${resp.status}`;
+              translating.value = false;
+              return;
+            }
+
+            const reader = resp.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = '';
+
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+
+              buffer += decoder.decode(value, { stream: true });
+              const lines = buffer.split('\n');
+              buffer = lines.pop() || '';
+
+              for (const line of lines) {
+                if (!line.startsWith('data: ') || line.trim() === 'data: [DONE]') continue;
+                try {
+                  const data = JSON.parse(line.slice(6));
+                  const delta = data.choices?.[0]?.delta?.content;
+                  if (delta) outputText.value += delta;
+                } catch {}
+              }
+            }
+
+            if (buffer.trim()) {
+              for (const line of buffer.split('\n')) {
+                if (!line.startsWith('data: ') || line.trim() === 'data: [DONE]') continue;
+                try {
+                  const data = JSON.parse(line.slice(6));
+                  const delta = data.choices?.[0]?.delta?.content;
+                  if (delta) outputText.value += delta;
+                } catch {}
+              }
+            }
+          } catch (err) {
+            errorMsg.value = `Request failed: ${err.message}`;
+          } finally {
+            translating.value = false;
+          }
+        }
+
+        async function copyOutput() {
+          try {
+            await navigator.clipboard.writeText(outputText.value);
+            copied.value = true;
+            setTimeout(() => { copied.value = false; }, 2000);
+          } catch {}
+        }
+
+        onMounted(async () => {
+          await Promise.all([fetchStatus(), fetchModels(), fetchLanguages()]);
+          setInterval(fetchStatus, 5000);
+        });
+
+        return {
+          darkMode, routerStatus, models, languages, languageNames,
+          selectedModel, sourceLang, sourceId, targetLang, targetId,
+          sourceVariants, targetVariants,
+          sourceText, additionals, outputText, translating, errorMsg, copied,
+          statusDotClass, canTranslate,
+          toggleTheme, swapLanguages, translate, copyOutput,
+          onSourceLangChange, onTargetLangChange,
+        };
+      },
+    }).mount('#app');
+  </script>
+</body>
+</html>
