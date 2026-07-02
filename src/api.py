@@ -2,7 +2,7 @@ import time
 from pathlib import Path
 
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import JSONResponse, StreamingResponse, Response, HTMLResponse
+from fastapi.responses import JSONResponse, StreamingResponse, Response, HTMLResponse, RedirectResponse
 from router import LLMRouter
 
 app = FastAPI()
@@ -17,6 +17,11 @@ def get_router() -> LLMRouter:
     return router
 
 # Custom endpoints for the router
+
+@app.get("/")
+async def root():
+    '''Land on the dashboard instead of falling into the proxy catch-all'''
+    return RedirectResponse(url="/dash")
 
 @app.get("/router")
 async def router_status():
@@ -91,10 +96,12 @@ async def router_load(body: dict):
 # History endpoints
 
 @app.get("/router/history")
-async def router_history(model: str | None = None):
-    '''Return request history, optionally filtered by model'''
+async def router_history(model: str | None = None, limit: int = 500):
+    '''Return the most recent request history rows, optionally filtered by
+    model. limit=0 returns everything (can be huge).'''
     r = get_router()
-    return await r.get_history(model)
+    limit = max(0, min(limit, 100000))
+    return await r.get_history(model, limit)
 
 @app.get("/router/reset_history")
 async def router_reset_history():

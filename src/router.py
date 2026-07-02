@@ -167,6 +167,7 @@ class LLMRouter:
                 )
             """)
             await db.execute("CREATE INDEX IF NOT EXISTS idx_history_model ON history(model)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_history_time ON history(request_time)")
             await db.commit()
         self._history_db_ready = True
 
@@ -186,14 +187,20 @@ class LLMRouter:
         except Exception as e:
             print(f"[ROUTER] failed to record history: {e}", flush=True)
 
-    async def get_history(self, model: str | None = None) -> list[dict]:
+    async def get_history(self, model: str | None = None, limit: int = 500) -> list[dict]:
+        '''Most recent rows first; limit=0 means no limit'''
         await self._ensure_history_db()
+        lim = " LIMIT ?" if limit else ""
         async with aiosqlite.connect(self._history_db_path) as db:
             db.row_factory = aiosqlite.Row
             if model:
-                cursor = await db.execute("SELECT * FROM history WHERE model = ? ORDER BY request_time DESC", (model,))
+                cursor = await db.execute(
+                    f"SELECT * FROM history WHERE model = ? ORDER BY request_time DESC{lim}",
+                    (model, limit) if limit else (model,))
             else:
-                cursor = await db.execute("SELECT * FROM history ORDER BY request_time DESC")
+                cursor = await db.execute(
+                    f"SELECT * FROM history ORDER BY request_time DESC{lim}",
+                    (limit,) if limit else ())
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
 

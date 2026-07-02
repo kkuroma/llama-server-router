@@ -404,7 +404,7 @@
             if (typeof va === 'string') return asc ? va.localeCompare(vb) : vb.localeCompare(va);
             return asc ? va - vb : vb - va;
           });
-          return arr;
+          return arr.slice(0, 100); // keep the DOM table light
         });
 
         function toggleTheme() {
@@ -418,6 +418,15 @@
         function formatTime(ts) {
           const d = new Date(ts * 1000);
           return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+        }
+
+        // Compact axis numbers: 1234 -> 1.2k, 2500000 -> 2.5M
+        function fmtNum(v) {
+          const a = Math.abs(v);
+          if (a >= 1e9) return (v / 1e9).toFixed(a >= 1e10 ? 0 : 1) + 'B';
+          if (a >= 1e6) return (v / 1e6).toFixed(a >= 1e7 ? 0 : 1) + 'M';
+          if (a >= 1e3) return (v / 1e3).toFixed(a >= 1e4 ? 0 : 1) + 'k';
+          return String(v);
         }
 
         // --- Data fetching ---
@@ -448,10 +457,10 @@
 
         async function fetchHistory() {
           try {
-            const url = historyModel.value
-              ? `/router/history?model=${encodeURIComponent(historyModel.value)}`
-              : '/router/history';
-            history.value = await (await fetch(url)).json();
+            // cap the window so a huge history DB doesn't stall the page
+            const params = new URLSearchParams({ limit: '500' });
+            if (historyModel.value) params.set('model', historyModel.value);
+            history.value = await (await fetch(`/router/history?${params}`)).json();
             updateHistoryChart();
           } catch {}
         }
@@ -513,7 +522,7 @@
           return {
             animation: false,
             textStyle: { color: p.subtext, fontFamily: 'ui-monospace, monospace', fontSize: 10 },
-            grid: { top: 8, right: 12, bottom: 28, left: 48, containLabel: false },
+            grid: { top: 8, right: 12, bottom: 28, left: 8, containLabel: true },
             tooltip: {
               backgroundColor: p.surface0, borderColor: p.surface1, borderWidth: 1,
               textStyle: { color: p.text, fontSize: 11 },
@@ -698,10 +707,10 @@
                 textStyle: { color: p.overlay0, fontSize: 10 },
                 icon: 'roundRect', itemWidth: 10, itemHeight: 6,
               },
-              grid: { top: 8, right: 12, bottom: 36, left: 48 },
+              grid: { top: 8, right: 12, bottom: 36, left: 8, containLabel: true },
               yAxis: {
                 type: 'value',
-                axisLabel: { color: p.overlay0, fontSize: 9 },
+                axisLabel: { color: p.overlay0, fontSize: 9, formatter: fmtNum },
                 splitLine: { lineStyle: { color: p.surface0, type: 'dashed' } },
                 axisLine: { show: false }, axisTick: { show: false },
               },
@@ -729,10 +738,10 @@
                 textStyle: { color: p.overlay0, fontSize: 10 },
                 icon: 'roundRect', itemWidth: 10, itemHeight: 6,
               },
-              grid: { top: 8, right: 12, bottom: 36, left: 48 },
+              grid: { top: 8, right: 12, bottom: 36, left: 8, containLabel: true },
               yAxis: {
                 type: 'value',
-                axisLabel: { color: p.overlay0, fontSize: 9 },
+                axisLabel: { color: p.overlay0, fontSize: 9, formatter: fmtNum },
                 splitLine: { lineStyle: { color: p.surface0, type: 'dashed' } },
                 axisLine: { show: false }, axisTick: { show: false },
               },
