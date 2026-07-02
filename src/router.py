@@ -325,18 +325,35 @@ class LLMRouter:
             p += 1
         return ports
 
-    async def _start_instance(self, port: int) -> int | None:
+    async def _start_instance(self, port: int, model_id: str) -> int | None:
         '''
-            Spawn one llama-server on *port*
-            Return its PID on success, None on failure
+            Spawn one llama-server on *port* hosting *model_id*, isolated to that
+            model's pinned GPUs via CUDA_VISIBLE_DEVICES.
+
+            Isolation matters: ggml initializes a CUDA context + reserves buffers
+            on *every visible* device, even ones the model isn't computing on
+            (a model pinned to GPU2 would still hold hundreds of MB / a couple GB
+            on GPUs 0 and 1). Masking the process to just its pinned GPUs keeps
+            that overhead off co-resident models' GPUs, so `gpus` alone is the
+            single source of truth for placement — no `device` preset key needed.
+            The devices are renumbered from 0 inside the process, which is why
+            presets must not hard-code absolute `device = CUDAn` ids.
         '''
-        print(f"[ROUTER] starting instance at port {port}...")
+        print(f"[ROUTER] starting instance for {model_id} at port {port}...")
         exe = self.router_config["llama-server-executable"]
+        env = dict(os.environ)
+        gpus = self.model_gpus.get(model_id, [0])
+        mask = ",".join(str(g) for g in gpus)
+        # CUDA + HIP/ROCm both honor their own *_VISIBLE_DEVICES; set both so the
+        # mask is backend-agnostic (the unused one is simply ignored).
+        env["CUDA_VISIBLE_DEVICES"] = mask
+        env["HIP_VISIBLE_DEVICES"] = mask
         proc = subprocess.Popen(
             [exe, "--host", "0.0.0.0", "--port", str(port),
              "--models-preset", self.llama_presets_path, "--metrics"],
             stdout=None, # inherit router's fds -> journald
             stderr=None, # inherit router's fds -> journald
+            env=env,
         )
         self.processes[port] = proc
         deadline = asyncio.get_event_loop().time() + self.HEALTH_CHECK_TIMEOUT
@@ -381,7 +398,7 @@ class LLMRouter:
             Spawn a llama-server on *port* hosting exactly *model_id*.
         '''
         for attempt in range(self.START_RETRIES):
-            pid = await self._start_instance(port)
+            pid = await self._start_instance(port, model_id)
             if pid is None:
                 continue
             if await self._load_into(port, model_id):

@@ -50,19 +50,24 @@ process is untouched. Requesting D evicts only C.
 
 ## GPU pinning
 
-Pinning has two halves that must agree:
+The `gpus` field on the model's entry (`config.json` `LLM` section, or the
+`gpus` attribute in the NixOS module) is the **single source of truth** for
+both halves of pinning:
 
-1. **Scheduler accounting** — the `gpus` field on the model's entry in the
-   router config (`config.json` `LLM` section, or the `gpus` attribute in the
-   NixOS module).
-2. **Physical placement** — the `device` key in the model's presets.ini
-   section (llama.cpp device names: `device = CUDA0,CUDA1`).
+1. **Scheduler accounting** — residency/eviction are tracked per GPU in `gpus`.
+2. **Physical placement** — the router spawns each llama-server with
+   `CUDA_VISIBLE_DEVICES` set to that model's `gpus`, so the process only ever
+   touches those devices.
 
-The NixOS module derives both from the single `gpus` attribute. Docker/manual
-users set both by hand — see `examples/config.json` + `examples/presets.ini`.
-Unpinned models default to GPU 0 in the scheduler; on multi-GPU hosts also set
-`device = CUDA0` explicitly, otherwise llama.cpp's default will shard the
-model across all GPUs while the router accounts it to GPU 0.
+You do **not** set a `device` key in presets.ini. Masking with
+`CUDA_VISIBLE_DEVICES` (rather than llama.cpp's `--device`) is deliberate: ggml
+initializes a CUDA context and reserves buffers on *every visible* device, so a
+model pinned via `--device` alone still holds hundreds of MB / a couple GB on
+the GPUs it isn't computing on — enough to OOM a co-resident model on a tight
+box. Masking keeps that overhead off other models' GPUs. Because the visible
+devices are renumbered from 0 inside each process, an absolute `device = CUDA2`
+would not even resolve; omit it. Unpinned models default to GPU 0 (masked to
+GPU 0), so on multi-GPU hosts they no longer silently shard across all GPUs.
 
 ## Usage as a NixOS module
 
@@ -102,7 +107,7 @@ Import `llama-router.nixosModules.default` into your host and configure:
     };
 
     # each model becomes a presets.ini section; num_instance and gpus are
-    # router-only (gpus also derives the llama-server `device` key)
+    # router-only (gpus masks the process via CUDA_VISIBLE_DEVICES; no device key)
     models = {
       "Qwen3-4B" = {
         num_instance = 1;
@@ -122,8 +127,9 @@ reverse proxy in front of it or scope your firewall accordingly before exposing
 it wider; spawned `llama-server` instances have no auth.
 
 Use `services.llama-router.llamaCpp` to supply a CUDA/ROCm build of llama.cpp,
-e.g. `pkgs.llama-cpp.override { cudaSupport = true; }`. For non-CUDA backends
-set `gpuDevicePrefix` (default `"CUDA"`) so derived device names match.
+e.g. `pkgs.llama-cpp.override { cudaSupport = true; }`. GPU masking sets both
+`CUDA_VISIBLE_DEVICES` and `HIP_VISIBLE_DEVICES`, so CUDA and ROCm both work
+with no extra configuration.
 
 ## Usage with Docker
 
@@ -142,7 +148,7 @@ docker compose up -d --build
 (request-history SQLite, read-write), and reserves all NVIDIA GPUs. To expose
 only some GPUs to the container, change the device reservation (`count: 2` or
 `device_ids: ["0","1"]`) — GPU ids inside the container are then renumbered
-from 0, and `gpus`/`device` pins refer to those container-local ids.
+from 0, and each model's `gpus` pin refers to those container-local ids.
 
 ## Running directly
 

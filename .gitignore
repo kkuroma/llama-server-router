@@ -2,3 +2,8 @@ result
 result-*
 __pycache__/
 *.pyc
+
+# docker deployment dirs (created at deploy time; see README "Usage with Docker")
+/models/
+/configs/
+/webui/

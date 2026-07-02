@@ -5,9 +5,6 @@ let
 
   iniAtom = with lib.types; oneOf [ bool int float str ];
 
-  # gpus = "all" / -1 / a list containing -1 means "every GPU"
-  gpusIsAll = g: g == "all" || g == -1 || (builtins.isList g && builtins.elem (-1) g);
-
   # Router JSON: pick num_instance + gpus per model out of the shared `models` attrset.
   routerConfig = pkgs.writeText "llama-router-config.json" (builtins.toJSON {
     LLM = lib.mapAttrs (_: m:
@@ -26,14 +23,11 @@ let
   });
 
   # Preset INI: drop num_instance + gpus (router-only) from each model, prepend
-  # the "[*]" globals. An explicit gpus list pins the model physically via the
-  # llama-server `device` key (unless the model already sets device itself);
-  # "all"/-1 emits no device key = llama-server's default (all GPUs).
-  mkPreset = m:
-    removeAttrs m [ "num_instance" "gpus" ]
-    // lib.optionalAttrs (m ? gpus && builtins.isList m.gpus && !gpusIsAll m.gpus && !(m ? device)) {
-      device = lib.concatMapStringsSep "," (i: "${cfg.gpuDevicePrefix}${toString i}") m.gpus;
-    };
+  # the "[*]" globals. Physical placement is NOT emitted as a `device` key:
+  # the router masks each llama-server to its `gpus` via CUDA_VISIBLE_DEVICES,
+  # which both pins compute and keeps ggml's per-device context/buffers off
+  # other GPUs. `gpus` is therefore the single source of truth for placement.
+  mkPreset = m: removeAttrs m [ "num_instance" "gpus" ];
   presetsFormat = pkgs.formats.ini {
     mkKeyValue = lib.generators.mkKeyValueDefault {} " = ";
   };
@@ -128,8 +122,9 @@ in
         Model presets. Each attribute becomes a llama.cpp presets.ini section;
         `num_instance` and `gpus` are consumed by the router and stripped from
         the INI. `gpus` pins the model to GPU ids (omitted = GPU 0 only;
-        "all" or -1 = every GPU) — an explicit list also emits a llama-server
-        `device` key so physical placement matches the scheduler's accounting.
+        "all" or -1 = every GPU) and is the single source of truth for physical
+        placement: the router masks each llama-server to those GPUs via
+        CUDA_VISIBLE_DEVICES, so no `device` key is emitted or needed.
       '';
     };
 
@@ -155,12 +150,6 @@ in
       type = lib.types.nullOr lib.types.ints.positive;
       default = null;
       description = "Number of GPUs. null = autodetect via NVML, falling back to highest pinned id + 1.";
-    };
-
-    gpuDevicePrefix = lib.mkOption {
-      type = lib.types.str;
-      default = "CUDA";
-      description = "Backend prefix used when deriving llama-server device names from gpu ids (CUDA0, ROCm0, ...).";
     };
 
     routerSettings = lib.mkOption {
