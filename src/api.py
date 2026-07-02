@@ -27,6 +27,10 @@ async def router_status():
     return {
         "status": r.status.value,
         "ports": sorted(r.processes.keys()),
+        "num_gpus": r.num_gpus,
+        "max_models_per_gpu": r.MAX_MODELS_PER_GPU,
+        "eviction_policy": r.EVICTION_POLICY,
+        "model_gpus": r.model_gpus,
     }
 
 @app.get("/router/start")

@@ -122,6 +122,24 @@ class LLMRouter:
             self.LOAD_POLL_TIMEOUT = router_settings.get("LOAD_POLL_TIMEOUT", 120.0) # max seconds to wait for a model to finish loading
             self.START_RETRIES = router_settings.get("START_RETRIES", 3) # attempts per instance on start()
             self.GRACEFUL_KILL_TIMEOUT = router_settings.get("GRACEFUL_KILL_TIMEOUT", 5.0) # seconds to wait after SIGTERM before SIGKILL
+            self.MAX_MODELS_PER_GPU = int(router_settings.get("MAX_MODELS_PER_GPU", 1)) # resident-model cap PER GPU (not global)
+            self.EVICTION_POLICY = str(router_settings.get("EVICTION_POLICY", "lru")).lower() # "lru" (last request) or "fifo" (load time)
+            self.QUEUE_FORCE_LOAD_TIMEOUT = float(router_settings.get("QUEUE_FORCE_LOAD_TIMEOUT", 300.0)) # seconds a queued request may starve before its model is force-loaded
+
+        if self.EVICTION_POLICY not in ("lru", "fifo"):
+            print(f"[ROUTER] unknown EVICTION_POLICY {self.EVICTION_POLICY!r}, falling back to 'lru'", flush=True)
+            self.EVICTION_POLICY = "lru"
+
+        # GPU topology: each model is pinned to a set of GPU ids ("gpus" in its
+        # LLM entry; absent -> [0], -1/"all" -> every GPU). Residency accounting
+        # and eviction are per GPU.
+        self.num_gpus = self._detect_num_gpus(router_settings.get("NUM_GPUS"))
+        self.model_gpus: dict[str, list[int]] = {
+            mid: self._resolve_gpus(mid, mcfg.get("gpus"))
+            for mid, mcfg in self.router_config["LLM"].items()
+        }
+        self.model_loaded_at: dict[str, float] = {} # model -> ts of last successful load
+        self.model_last_used: dict[str, float] = {} # model -> ts of last dispatched request (or load)
 
         self.status: Status = Status.INACTIVE
         self.processes: dict[int, subprocess.Popen] = {} # port -> Popen
@@ -186,6 +204,87 @@ class LLMRouter:
         async with aiosqlite.connect(self._history_db_path) as db:
             await db.execute("DELETE FROM history")
             await db.commit()
+
+    # GPU topology / eviction planning
+
+    def _detect_num_gpus(self, configured) -> int:
+        '''
+            GPU count: explicit ROUTER.NUM_GPUS wins, then pynvml,
+            then highest explicit pin + 1, then 1.
+        '''
+        if configured:
+            return max(1, int(configured))
+        try:
+            import pynvml
+            pynvml.nvmlInit()
+            n = pynvml.nvmlDeviceGetCount()
+            if n > 0:
+                return n
+        except Exception:
+            pass
+        max_pin = 0
+        for mcfg in self.router_config["LLM"].values():
+            raw = mcfg.get("gpus")
+            vals = raw if isinstance(raw, list) else [raw]
+            for v in vals:
+                if isinstance(v, int) and v > max_pin:
+                    max_pin = v
+        return max_pin + 1
+
+    def _resolve_gpus(self, model_id: str, raw) -> list[int]:
+        '''
+            Normalize a model's "gpus" field to a sorted list of valid GPU ids.
+            None -> [0] (unpinned = GPU 0 only); -1 or "all" -> every GPU.
+        '''
+        if raw is None:
+            return [0]
+        if not isinstance(raw, list):
+            raw = [raw]
+        ids: set[int] = set()
+        for v in raw:
+            if isinstance(v, str) and v.strip().lower() in ("all", "*"):
+                return list(range(self.num_gpus))
+            try:
+                i = int(v)
+            except (TypeError, ValueError):
+                print(f"[ROUTER] {model_id}: invalid gpu id {v!r}, ignoring", flush=True)
+                continue
+            if i == -1:
+                return list(range(self.num_gpus))
+            if 0 <= i < self.num_gpus:
+                ids.add(i)
+            else:
+                print(f"[ROUTER] {model_id}: gpu id {i} out of range (num_gpus={self.num_gpus}), ignoring", flush=True)
+        if not ids:
+            print(f"[ROUTER] {model_id}: no valid gpu ids, defaulting to [0]", flush=True)
+            return [0]
+        return sorted(ids)
+
+    def _plan_evictions(self, model_id: str, loaded: set[str]) -> set[str]:
+        '''
+            Decide which resident models must be unloaded so *model_id* fits.
+            Per GPU that model_id is pinned to: if residents would exceed
+            MAX_MODELS_PER_GPU with model_id added, evict the oldest residents
+            of THAT GPU (by last request for "lru", by load time for "fifo").
+            Models on GPUs model_id doesn't touch are left alone.
+        '''
+        age = self.model_last_used if self.EVICTION_POLICY == "lru" else self.model_loaded_at
+        evict: set[str] = set()
+        for gpu in self.model_gpus.get(model_id, [0]):
+            residents = [
+                m for m in loaded
+                if m != model_id and m not in evict
+                and gpu in self.model_gpus.get(m, [0])
+            ]
+            overflow = len(residents) - (self.MAX_MODELS_PER_GPU - 1)
+            if overflow > 0:
+                residents.sort(key=lambda m: age.get(m, 0.0))
+                evict.update(residents[:overflow])
+        return evict
+
+    def _forget_model(self, model_id: str):
+        self.model_loaded_at.pop(model_id, None)
+        self.model_last_used.pop(model_id, None)
 
     async def _start_instance(self, port: int) -> int | None:
         '''
@@ -294,6 +393,8 @@ class LLMRouter:
         )
         self.processes.clear()
         self.requests.clear()
+        self.model_loaded_at.clear()
+        self.model_last_used.clear()
         self._load_lock = AsyncRWLock()
         self.request_lock = asyncio.Lock()
         self._has_requests = asyncio.Event()
@@ -350,9 +451,13 @@ class LLMRouter:
 
     async def load_model(self, model_id: str):
         '''
-            Swap all instances' loaded model to *model_id* by the following algorithm
-                1) Unloads everything currently loaded (/models/unload)
-                2) adjusts instance count to math model_id's num_instance config
+            Make *model_id* resident by the following algorithm
+                1) Evicts per-GPU overflow: on each GPU model_id is pinned to,
+                   unload the oldest residents until the new model fits under
+                   MAX_MODELS_PER_GPU. Models on other GPUs are untouched.
+                2) Adjusts instance count to match model_id's num_instance config
+                   (only when eviction left no other model resident — resizing
+                   kills/spawns processes and would drop coresident models)
                 3) Loads *model_id* to all instances (/model/load) then wait for success
         '''
         if model_id not in self.router_config["LLM"]:
@@ -362,22 +467,25 @@ class LLMRouter:
         await self._load_lock.acquire_exclusive()
         print(f"[ROUTER] initiate loading of model: {model_id}...")
         try:
-            # 1) unload all currently loaded models
+            # 1) evict per-GPU overflow
             loaded = await self.get_loaded_models()
             if model_id in loaded:
+                self.model_last_used[model_id] = time.time()
                 print(f"[ROUTER] models: {model_id} already present in memory")
                 return True
-            print(f"[ROUTER] models: {loaded} present in memory, unloading...")
-            if loaded:
+            evict = self._plan_evictions(model_id, loaded)
+            print(f"[ROUTER] models: {loaded or '{}'} present in memory, evicting {evict or 'nothing'} "
+                  f"(gpus={self.model_gpus.get(model_id, [0])}, cap={self.MAX_MODELS_PER_GPU}/gpu, policy={self.EVICTION_POLICY})")
+            if evict:
                 async with httpx.AsyncClient() as client:
                     for port in self._sorted_ports():
-                        for mid in loaded:
+                        for mid in evict:
                             await client.post(f"http://0.0.0.0:{port}/models/unload", json={"model": mid}, timeout=30.0)
-                # poll until every model reports exactly "unloaded" on all instances
+                # poll until every evicted model reports exactly "unloaded" on all instances
                 deadline = asyncio.get_event_loop().time() + self.UNLOAD_POLL_TIMEOUT
                 while asyncio.get_event_loop().time() < deadline:
                     statuses = await asyncio.gather(
-                        *[self._all_instances_report_status(mid, "unloaded") for mid in loaded]
+                        *[self._all_instances_report_status(mid, "unloaded") for mid in evict]
                     )
                     if all(statuses):
                         break
@@ -385,17 +493,24 @@ class LLMRouter:
                 else:
                     raise RuntimeError("[LOAD/UNLOAD ERROR] Timed out waiting for models to unload")
                     return False
+                for mid in evict:
+                    self._forget_model(mid)
 
-            # 2) adjust instance count
+            # 2) adjust instance count (only when no other model remains resident)
+            remaining = loaded - evict
             target = self.router_config["LLM"].get(model_id, {"num_instance": 1})["num_instance"]
             current_ports = self._sorted_ports()
-            if len(current_ports) > target: # kill the highest-numbered ports first
-                to_kill = current_ports[target:]
-                await asyncio.gather(*[self._kill_instance(p) for p in to_kill])
-            elif len(current_ports) < target: # spawn new ports numerically above the current max
-                base = (max(current_ports) + 1) if current_ports else self.router_config["LLM-base-port"]
-                needed = target - len(current_ports)
-                await asyncio.gather(*[self._start_instance(base + i) for i in range(needed)])
+            if not remaining:
+                if len(current_ports) > target: # kill the highest-numbered ports first
+                    to_kill = current_ports[target:]
+                    await asyncio.gather(*[self._kill_instance(p) for p in to_kill])
+                elif len(current_ports) < target: # spawn new ports numerically above the current max
+                    base = (max(current_ports) + 1) if current_ports else self.router_config["LLM-base-port"]
+                    needed = target - len(current_ports)
+                    await asyncio.gather(*[self._start_instance(base + i) for i in range(needed)])
+            elif len(current_ports) != target:
+                print(f"[ROUTER] {model_id} wants {target} instance(s) but {remaining} still resident "
+                      f"on {len(current_ports)} instance(s) — skipping resize", flush=True)
 
             # 3) load model on all instances
             loaded = await self.get_loaded_models()
@@ -415,6 +530,9 @@ class LLMRouter:
             deadline = asyncio.get_event_loop().time() + self.LOAD_POLL_TIMEOUT
             while asyncio.get_event_loop().time() < deadline:
                 if await self._all_instances_report_status(model_id, "loaded"):
+                    now = time.time()
+                    self.model_loaded_at[model_id] = now
+                    self.model_last_used[model_id] = now
                     print(f"[LOAD/UNLOAD SUCCESS] Successfully loaded {model_id}")
                     loaded = await self.get_loaded_models()
                     print(f"[LOAD CONFIRMATION] Loaded models: {loaded}")
@@ -440,6 +558,7 @@ class LLMRouter:
             deadline = asyncio.get_event_loop().time() + self.UNLOAD_POLL_TIMEOUT
             while asyncio.get_event_loop().time() < deadline:
                 if await self._all_instances_report_status(model_id, "unloaded"):
+                    self._forget_model(model_id)
                     print(f"[UNLOAD SUCCESS] Successfully unloaded {model_id}")
                     loaded = await self.get_loaded_models()
                     print(f"[UNLOAD CONFIRMATION] Currently loaded models: {loaded}")
@@ -498,13 +617,27 @@ class LLMRouter:
 
                 self.status = Status.SERVING
                 loaded = await self.get_loaded_models()
-                # pick a request to serve: first request that matches the model or has no model field
+                # Starvation guard: if the oldest queued request's model is not
+                # loaded and it has waited past QUEUE_FORCE_LOAD_TIMEOUT, force
+                # its load instead of serving newer cache-hit requests forever.
                 chosen_idx = None
-                for i, entry in enumerate(self.requests):
-                    req_model = entry["request"].get("model")
-                    if req_model is None or req_model in loaded:
-                        chosen_idx = i
-                        break
+                head = self.requests[0]
+                head_model = head["request"].get("model")
+                starved = (
+                    head_model is not None
+                    and head_model not in loaded
+                    and time.time() - head["request_time"] >= self.QUEUE_FORCE_LOAD_TIMEOUT
+                )
+                if starved:
+                    print(f"[ROUTER] head-of-queue request for {head_model} waited "
+                          f">{self.QUEUE_FORCE_LOAD_TIMEOUT}s, force-loading", flush=True)
+                else:
+                    # pick a request to serve: first request that matches the model or has no model field
+                    for i, entry in enumerate(self.requests):
+                        req_model = entry["request"].get("model")
+                        if req_model is None or req_model in loaded:
+                            chosen_idx = i
+                            break
                 # there's a servable request
                 if chosen_idx is not None:
                     entry = self.requests.pop(chosen_idx)
@@ -513,6 +646,10 @@ class LLMRouter:
                     entry = self.requests.pop(0)
                     model_to_load = entry["request"].get("model")
                     await self.load_model(model_to_load)
+                # touch LRU for the model about to be served
+                served_model = entry["request"].get("model")
+                if served_model:
+                    self.model_last_used[served_model] = time.time()
 
             # Dispatch forwarding as a concurrent task
             if entry["is_streaming"]:

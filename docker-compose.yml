@@ -1,0 +1,25 @@
+services:
+  llama-router:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: llama-router
+    container_name: llama-router
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    environment:
+      - ROUTER_CONFIG_PATH=/configs/config.json
+      - LLAMA_PRESETS_PATH=/configs/presets.ini
+      - HISTORY_DB_PATH=/webui/monitor/history.db
+    volumes:
+      - ./models:/models:ro
+      - ./configs:/configs:ro
+      - ./webui:/webui:rw
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

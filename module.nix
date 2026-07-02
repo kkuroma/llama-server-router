@@ -5,22 +5,41 @@ let
 
   iniAtom = with lib.types; oneOf [ bool int float str ];
 
-  # Router JSON: pick num_instance per model out of the shared `models` attrset.
+  # gpus = "all" / -1 / a list containing -1 means "every GPU"
+  gpusIsAll = g: g == "all" || g == -1 || (builtins.isList g && builtins.elem (-1) g);
+
+  # Router JSON: pick num_instance + gpus per model out of the shared `models` attrset.
   routerConfig = pkgs.writeText "llama-router-config.json" (builtins.toJSON {
-    LLM = lib.mapAttrs (_: m: { num_instance = m.num_instance or 1; }) cfg.models;
-    ROUTER = cfg.routerSettings;
+    LLM = lib.mapAttrs (_: m:
+      { num_instance = m.num_instance or 1; }
+      // lib.optionalAttrs (m ? gpus) { inherit (m) gpus; }
+    ) cfg.models;
+    ROUTER = {
+      MAX_MODELS_PER_GPU = cfg.maxModelsPerGpu;
+      EVICTION_POLICY = cfg.evictionPolicy;
+      QUEUE_FORCE_LOAD_TIMEOUT = cfg.queueForceLoadTimeout;
+    } // lib.optionalAttrs (cfg.gpuCount != null) { NUM_GPUS = cfg.gpuCount; }
+      // cfg.routerSettings;
     "API-port" = cfg.port;
     "LLM-base-port" = cfg.llmBasePort;
     "llama-server-executable" = "${cfg.llamaCpp}/bin/llama-server";
   });
 
-  # Preset INI: drop num_instance (router-only) from each model, prepend the "[*]" globals
+  # Preset INI: drop num_instance + gpus (router-only) from each model, prepend
+  # the "[*]" globals. An explicit gpus list pins the model physically via the
+  # llama-server `device` key (unless the model already sets device itself);
+  # "all"/-1 emits no device key = llama-server's default (all GPUs).
+  mkPreset = m:
+    removeAttrs m [ "num_instance" "gpus" ]
+    // lib.optionalAttrs (m ? gpus && builtins.isList m.gpus && !gpusIsAll m.gpus && !(m ? device)) {
+      device = lib.concatMapStringsSep "," (i: "${cfg.gpuDevicePrefix}${toString i}") m.gpus;
+    };
   presetsFormat = pkgs.formats.ini {
     mkKeyValue = lib.generators.mkKeyValueDefault {} " = ";
   };
   presetsIni = presetsFormat.generate "llama-presets.ini" (
     lib.optionalAttrs (cfg.presetGlobals != {}) { "*" = cfg.presetGlobals; }
-    // lib.mapAttrs (_: m: removeAttrs m [ "num_instance" ]) cfg.models
+    // lib.mapAttrs (_: mkPreset) cfg.models
   );
 in
 {
@@ -92,12 +111,13 @@ in
     };
 
     models = lib.mkOption {
-      type = lib.types.attrsOf (lib.types.attrsOf iniAtom);
+      type = lib.types.attrsOf (lib.types.attrsOf (lib.types.either iniAtom (lib.types.listOf lib.types.int)));
       default = {};
       example = lib.literalExpression ''
         {
           "Qwen3-4B" = {
             num_instance = 1;
+            gpus = [ 0 1 ];
             model = "/data/llm-models/Qwen3-4B-Q8_0.gguf";
             c = 65536;
             parallel = 4;
@@ -106,8 +126,41 @@ in
       '';
       description = ''
         Model presets. Each attribute becomes a llama.cpp presets.ini section;
-        `num_instance` is consumed by the router and stripped from the INI.
+        `num_instance` and `gpus` are consumed by the router and stripped from
+        the INI. `gpus` pins the model to GPU ids (omitted = GPU 0 only;
+        "all" or -1 = every GPU) — an explicit list also emits a llama-server
+        `device` key so physical placement matches the scheduler's accounting.
       '';
+    };
+
+    maxModelsPerGpu = lib.mkOption {
+      type = lib.types.ints.positive;
+      default = 1;
+      description = "How many models may stay resident PER GPU before the router evicts.";
+    };
+
+    evictionPolicy = lib.mkOption {
+      type = lib.types.enum [ "lru" "fifo" ];
+      default = "lru";
+      description = "Which resident model to evict on overflow: least-recently-requested (lru) or earliest-loaded (fifo).";
+    };
+
+    queueForceLoadTimeout = lib.mkOption {
+      type = lib.types.numbers.positive;
+      default = 300;
+      description = "Seconds the head-of-queue request may wait for an unloaded model before the router force-loads it past newer cache-hit requests.";
+    };
+
+    gpuCount = lib.mkOption {
+      type = lib.types.nullOr lib.types.ints.positive;
+      default = null;
+      description = "Number of GPUs. null = autodetect via NVML, falling back to highest pinned id + 1.";
+    };
+
+    gpuDevicePrefix = lib.mkOption {
+      type = lib.types.str;
+      default = "CUDA";
+      description = "Backend prefix used when deriving llama-server device names from gpu ids (CUDA0, ROCm0, ...).";
     };
 
     routerSettings = lib.mkOption {
