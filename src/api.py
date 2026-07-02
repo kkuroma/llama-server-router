@@ -27,6 +27,7 @@ async def router_status():
     return {
         "status": r.status.value,
         "ports": sorted(r.processes.keys()),
+        "instances": {str(p): m for p, m in sorted(r.port_model.items())},
         "num_gpus": r.num_gpus,
         "max_models_per_gpu": r.MAX_MODELS_PER_GPU,
         "eviction_policy": r.EVICTION_POLICY,
@@ -114,18 +115,36 @@ async def dashboard():
 
 @app.get("/router/models")
 async def router_models():
-    '''Return all configured models with their current load status'''
+    '''Return all configured models with their current load status.
+    Synthesized from router state (ports are per-model now).'''
     r = get_router()
-    if not r.processes:
-        return {"models": []}
-    port = next(iter(r.processes.keys()))
-    try:
-        import httpx
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(f"http://0.0.0.0:{port}/models", timeout=5.0)
-            return resp.json()
-    except Exception:
-        return {"models": []}
+    loaded = await r.get_loaded_models()
+    return {
+        "object": "list",
+        "data": [
+            {
+                "id": mid,
+                "status": {"value": "loaded" if mid in loaded else "unloaded"},
+                "gpus": r.model_gpus.get(mid, [0]),
+                "ports": r._model_ports(mid),
+            }
+            for mid in r.router_config["LLM"]
+        ],
+    }
+
+@app.get("/v1/models")
+async def v1_models():
+    '''OpenAI-compatible model listing, served by the router itself so it
+    works even when no llama-server replica is running.'''
+    r = get_router()
+    created = int(time.time())
+    return {
+        "object": "list",
+        "data": [
+            {"id": mid, "object": "model", "created": created, "owned_by": "llama-router"}
+            for mid in r.router_config["LLM"]
+        ],
+    }
 
 @app.get("/router/gpu")
 async def router_gpu():
@@ -284,7 +303,18 @@ async def proxy(full_path: str, request: Request):
 
     # enqueue and await result
     future = await r.add_request(envelope)
-    result = await future
+    try:
+        result = await future
+    except Exception as e:
+        return JSONResponse(
+            status_code=502,
+            content={
+                "error": {
+                    "message": str(e),
+                    "code": "upstream_error"
+                }
+            }
+        )
 
     if is_streaming:
         async def stream_chunks():

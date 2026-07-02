@@ -11,33 +11,42 @@ plus a translation UI.
 
 ## Scheduling model
 
+**One llama-server process per loaded model replica.** Loading a model spawns
+`num_instance` llama-server processes (each hosting exactly that model, pinned
+to its GPUs); evicting kills them, which frees VRAM unconditionally. The router
+owns all placement decisions — llama-server's own `models-max` is irrelevant
+in this design and can be omitted.
+
 Each model is pinned to a set of GPU ids. The router keeps at most
 `MAX_MODELS_PER_GPU` models resident **per GPU** (not globally): models pinned
 to disjoint GPUs stay in memory together, and loading a model only evicts
 residents on the GPUs it actually needs.
 
 Example with `MAX_MODELS_PER_GPU = 1`: models A and B pinned to GPUs `[0, 1]`,
-C and D pinned to `[2]`. A and C can be resident simultaneously. Requesting B
-evicts only A (GPUs 0/1); C stays loaded. Requesting D evicts only C.
+C and D pinned to `[2]`. A and C can be resident simultaneously (two
+llama-server processes). Requesting B kills only A's process (GPUs 0/1); C's
+process is untouched. Requesting D evicts only C.
 
 - **No `gpus` field** → the model counts against GPU 0 only. On a single-GPU
   host this reproduces plain global behavior exactly.
 - **`gpus = "all"` or `-1`** → the model counts against every GPU (it will
   evict on all of them as needed).
 - **Eviction policy**: `lru` (default, evicts the model whose last request is
-  oldest) or `fifo` (evicts the earliest-loaded model).
+  oldest) or `fifo` (evicts the earliest-loaded model). Either way, residents
+  with requests still waiting in the queue are only evicted when there is no
+  other candidate on that GPU.
 - **Anti-starvation**: if the head-of-queue request needs a model that isn't
   loaded and has waited longer than `QUEUE_FORCE_LOAD_TIMEOUT` (default 300 s),
   the router force-loads it instead of serving newer cache-hit requests forever.
+- **Crash recovery**: dead replicas are reaped automatically; the model simply
+  reloads on its next request.
+- **`num_instance > 1`** spawns that many replica processes of the model
+  (requests balance across them by in-flight count). Each replica is a full
+  copy of the weights — VRAM scales linearly.
 - GPU count is autodetected via NVML; override with `ROUTER.NUM_GPUS` (falls
   back to highest pinned id + 1 when NVML is unavailable).
-
-**Important — `models-max`:** llama-server enforces its own per-instance
-resident cap (`models-max` in the presets `[*]` section). It must be at least
-the maximum number of models that can be co-resident across all GPUs
-(`MAX_MODELS_PER_GPU × GPU count`), otherwise llama-server evicts behind the
-router's back. On a single GPU with `MAX_MODELS_PER_GPU = 1`, `models-max = 1`
-is correct.
+- Small overhead note: co-resident models are separate processes, so each pays
+  its own CUDA context (~a few hundred MB per process per GPU it touches).
 
 ## GPU pinning
 
@@ -90,7 +99,6 @@ Import `llama-router.nixosModules.default` into your host and configure:
       jinja = true;
       fa = true;
       ngl = 99;
-      models-max = 1; # must be >= max co-resident models (see Scheduling model)
     };
 
     # each model becomes a presets.ini section; num_instance and gpus are
