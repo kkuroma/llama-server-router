@@ -1,0 +1,15 @@
+# Standalone deployment override.
+#   cp docker-compose.override.yml.example docker-compose.override.yml
+#   mkdir -p models configs webui
+#   cp examples/config.json examples/presets.ini configs/
+#   # drop .gguf files into models/, edit configs to match
+#   docker compose up -d --build
+#
+# `docker compose` auto-merges this over docker-compose.yml. For a multi-service
+# stack, don't use this file — a parent compose supplies the mounts instead.
+services:
+  llama-router:
+    volumes:
+      - ./models:/models:ro     # .gguf weights (read-only)
+      - ./configs:/configs:ro   # config.json + presets.ini
+      - ./webui:/webui:rw       # request-history SQLite

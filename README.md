@@ -136,19 +136,49 @@ with no extra configuration.
 The image layers the router on top of `ghcr.io/ggml-org/llama.cpp:server-cuda`
 (which provides `llama-server` at `/app/llama-server`).
 
+`docker-compose.yml` is a **host-agnostic base**: it defines how to build/run the
+router (port 11434, env, healthcheck, reserves all GPUs) but declares **no
+mounts** — where the weights/configs live is the deployer's decision. The router
+reads three paths inside the container: `/models` (ggufs, ro), `/configs`
+(`config.json` + `presets.ini`, ro) and `/webui` (request-history SQLite, rw).
+Supply them one of two ways:
+
+**Standalone** — one router on one host:
+
 ```
+cp docker-compose.override.yml.example docker-compose.override.yml
 mkdir -p models configs webui
 cp examples/config.json examples/presets.ini configs/
 # drop your .gguf files into models/, edit the configs to match
 docker compose up -d --build
 ```
 
-`docker-compose.yml` expects three mounts: `./models` (ggufs, read-only),
-`./configs` (`config.json` + `presets.ini`, read-only) and `./webui`
-(request-history SQLite, read-write), and reserves all NVIDIA GPUs. To expose
-only some GPUs to the container, change the device reservation (`count: 2` or
-`device_ids: ["0","1"]`) — GPU ids inside the container are then renumbered
-from 0, and each model's `gpus` pin refers to those container-local ids.
+`docker compose` auto-merges the override, which adds `./models`, `./configs`,
+`./webui`. The override is gitignored, so `git pull` stays clean.
+
+**Orchestrated** — this router as one service in a larger stack. A parent
+compose `include:`s this file and patches in the host mounts (and can point them
+at shared directories outside this repo, e.g. a central weights dir):
+
+```yaml
+# ../docker-compose.yml   (run `docker compose up` from the parent dir)
+include:
+  - llama-router/docker-compose.yml
+services:
+  llama-router:
+    volumes:
+      - ../clanker-weights:/models:ro
+      - ./config/llama-router:/configs:ro
+      - ./webui:/webui:rw
+```
+
+`include` resolves this file's `build:` context relative to `llama-router/`,
+while the parent's added `volumes:` resolve relative to the parent — so upstream
+`git pull`s here never touch the host wiring.
+
+To expose only some GPUs, override the device reservation (`count: 2` or
+`device_ids: ["0","1"]`) from the deployer file — GPU ids inside the container
+renumber from 0, and each model's `gpus` pin refers to those container-local ids.
 
 ## Running directly
 

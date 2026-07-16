@@ -7,3 +7,5 @@ __pycache__/
 /models/
 /configs/
 /webui/
+# local deploy override (host-specific mounts); ship the .example instead
+/docker-compose.override.yml

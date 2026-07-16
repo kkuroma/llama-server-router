@@ -1,3 +1,10 @@
+# Base service definition. It is intentionally host-agnostic: it declares HOW to
+# build/run the router, but NOT where the weights/configs live on a given host.
+# Those three mounts (/models, /configs, /webui) are supplied by the deployer:
+#   - standalone:   copy docker-compose.override.yml.example -> docker-compose.override.yml
+#   - orchestrated: a parent compose `include:`s this file and patches in the mounts
+#                   (see the multi-service stack in the deploy README).
+# This keeps `git pull` clean — host specifics never live in this tracked file.
 services:
   llama-router:
     build:
@@ -21,10 +28,9 @@ services:
       timeout: 5s
       retries: 3
       start_period: 20s
-    volumes:
-      - ./models:/models:ro
-      - ./configs:/configs:ro
-      - ./webui:/webui:rw
+    # Reserve all NVIDIA GPUs; the router masks each spawned llama-server to its
+    # model's `gpus` via CUDA_VISIBLE_DEVICES. To expose only some, override
+    # `count`/`device_ids` from the deployer file.
     deploy:
       resources:
         reservations:
