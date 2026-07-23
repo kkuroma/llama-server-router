@@ -14,8 +14,14 @@ ROUTER_CONFIG_PATH  = os.environ.get("ROUTER_CONFIG_PATH", "/configs/config.json
 LLAMA_PRESETS_PATH  = os.environ.get("LLAMA_PRESETS_PATH", "/configs/presets.ini")
 ROUTER_HOST         = os.environ.get("ROUTER_HOST", "0.0.0.0")
 
+
 async def _shutdown(router: LLMRouter):
-    """Best-effort cleanup: stop all child processes."""
+    """
+    Performs best-effort cleanup by stopping all child processes
+
+    Args:
+        router (LLMRouter): The router whose replicas should be stopped
+    """
     print("[main] shutting down router ...", flush=True)
     try:
         await router.stop()
@@ -24,7 +30,13 @@ async def _shutdown(router: LLMRouter):
     print("[main] all instances stopped.", flush=True)
 
 
-def _print_status(router: LLMRouter):
+def _printStatus(router: LLMRouter):
+    """
+    Prints the router's listening port, status, and live instance ports
+
+    Args:
+        router (LLMRouter): The router whose state should be printed
+    """
     api_port = router.router_config.get("API-port", 8000)
     print(f"[main] LLM Router listening on port {api_port}", flush=True)
     print(f"[main] status : {router.status.value}", flush=True)
@@ -32,10 +44,16 @@ def _print_status(router: LLMRouter):
 
 
 async def main():
+    """
+    Boots the router, monitors, and translation service, then serves the API
+
+    Wires the shared services onto the api module, starts a 1s monitor loop,
+    installs signal handlers, and runs uvicorn until shutdown
+    """
     router = LLMRouter(ROUTER_CONFIG_PATH, LLAMA_PRESETS_PATH)
     await router.start()
-    await router.init_history_db()
-    _print_status(router)
+    await router.initHistoryDb()
+    _printStatus(router)
     api.router = router
 
     # GPU + status monitoring
@@ -57,24 +75,26 @@ async def main():
     except Exception as exc:
         print(f"[main] Translation service unavailable: {exc}", flush=True)
 
-    async def _monitor_loop():
+    async def _monitorLoop():
+        """Polls GPU stats and records router status every second."""
         while True:
             if gpu_monitor:
                 await asyncio.to_thread(gpu_monitor.poll)
             status_timeline.record(router.status.value)
             await asyncio.sleep(1.0)
 
-    asyncio.create_task(_monitor_loop())
+    asyncio.create_task(_monitorLoop())
 
     loop = asyncio.get_event_loop()
 
-    async def _signal_handler():
+    async def _signalHandler():
+        """Runs cleanup and stops the event loop on a shutdown signal."""
         print("\n[main] received shutdown signal", flush=True)
         await _shutdown(router)
         loop.stop()
 
     for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, lambda: asyncio.ensure_future(_signal_handler()))
+        loop.add_signal_handler(sig, lambda: asyncio.ensure_future(_signalHandler()))
 
     api_port = router.router_config.get("API-port", 8000)
     config = uvicorn.Config(app=api.app, host=ROUTER_HOST, port=api_port, log_level="info")

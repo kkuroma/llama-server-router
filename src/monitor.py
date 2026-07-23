@@ -11,6 +11,13 @@ FLUSH_INTERVAL = 10.0  # flush every 10s for higher resolution
 
 
 class GPUMonitor:
+    """
+    Samples GPU utilization and VRAM once per second and keeps a rolling window
+
+    Reads GPU index 0 only via NVML, buffering per-second samples and flushing
+    their maxima every FLUSH_INTERVAL to keep the history compact
+    """
+
     def __init__(self):
         if not _PYNVML_AVAILABLE:
             raise RuntimeError("pynvml is not installed")
@@ -24,7 +31,12 @@ class GPUMonitor:
         self._last_flush_time: float = time.time()
 
     def poll(self):
-        """Called every 1s from a background thread."""
+        """
+        Records one utilization/VRAM sample, flushing maxima on the interval
+
+        Called every 1s from a background thread; on flush it appends the window
+        maxima and drops history older than WINDOW_SECONDS
+        """
         util = pynvml.nvmlDeviceGetUtilizationRates(self.handle)
         mem = pynvml.nvmlDeviceGetMemoryInfo(self.handle)
         self._util_samples.append(util.gpu)
@@ -45,12 +57,24 @@ class GPUMonitor:
 
 
 class StatusTimeline:
+    """
+    Records router status changes over a rolling window
+
+    Only appends when the status actually changes, dropping entries older than
+    WINDOW_SECONDS on each change
+    """
+
     def __init__(self):
         self.entries: list[tuple[float, str]] = []  # (unix_ts, status_value)
         self._last_status: str | None = None
 
     def record(self, status_value: str):
-        """Called every 1s. Only appends when status changes."""
+        """
+        Appends a status entry when the value differs from the previous one
+
+        Args:
+            status_value (str): The current router status value to record
+        """
         if status_value != self._last_status:
             now = time.time()
             self.entries.append((now, status_value))
