@@ -213,14 +213,10 @@ async def v1Models():
 
 @app.get("/router/gpu")
 async def routerGpu():
-    """Returns GPU utilization and VRAM history from the monitor."""
+    """Returns per-GPU utilization and VRAM history for every detected GPU."""
     if gpu_monitor is None:
-        return {"error": "GPU monitor not available"}
-    return {
-        "total_vram_mb": gpu_monitor.total_vram_mb,
-        "util_history": gpu_monitor.util_history,
-        "vram_history": gpu_monitor.vram_history,
-    }
+        return {"error": "GPU monitor not available", "gpus": []}
+    return {"gpus": gpu_monitor.snapshot()}
 
 @app.get("/router/status_timeline")
 async def routerStatusTimeline():

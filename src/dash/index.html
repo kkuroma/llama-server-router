@@ -71,10 +71,11 @@
     <!-- Main content -->
     <div class="flex flex-col lg:flex-row gap-4 p-4 max-w-screen-2xl mx-auto">
 
-      <!-- Left panel -->
-      <div class="w-full lg:w-[320px] flex-shrink-0 space-y-4">
+      <!-- Left panel: stretches to the right panel's height; Models fills the
+           remainder and scrolls internally when it overflows. -->
+      <div class="w-full lg:w-[320px] flex-shrink-0 flex flex-col gap-4 min-h-0">
         <!-- Router controls -->
-        <div class="card bg-base-200 border border-base-300">
+        <div class="card bg-base-200 border border-base-300 flex-shrink-0">
           <div class="card-body p-4 gap-3">
             <h2 class="text-xs font-semibold uppercase tracking-wider opacity-60">Router</h2>
             <div class="flex items-center gap-2">
@@ -110,11 +111,11 @@
           </div>
         </div>
 
-        <!-- Models -->
-        <div class="card bg-base-200 border border-base-300">
-          <div class="card-body p-4 gap-3">
-            <h2 class="text-xs font-semibold uppercase tracking-wider opacity-60">Models</h2>
-            <div class="space-y-2">
+        <!-- Models: flex-1 so it fills the column; list scrolls past overflow -->
+        <div class="card bg-base-200 border border-base-300 flex-1 min-h-0 overflow-hidden">
+          <div class="card-body p-4 gap-3 min-h-0">
+            <h2 class="text-xs font-semibold uppercase tracking-wider opacity-60 flex-shrink-0">Models</h2>
+            <div class="space-y-2 overflow-y-auto flex-1 min-h-0 pr-1 lg:max-h-none max-h-96">
               <div v-for="m in models" :key="m.id"
                 class="model-row flex items-center justify-between p-2 rounded-lg bg-base-100/50"
                 :style="{ borderLeftColor: modelColor(m.id) }">
@@ -123,7 +124,7 @@
                     :style="{ backgroundColor: m.loaded ? modelColor(m.id) : 'transparent', border: m.loaded ? 'none' : '1.5px solid ' + modelColor(m.id), opacity: m.loaded ? 1 : 0.4 }"></div>
                   <span class="font-mono text-xs truncate" :title="m.id" :style="{ color: modelColor(m.id) }">{{ m.id }}</span>
                 </div>
-                <button class="btn btn-xs"
+                <button class="btn btn-xs flex-shrink-0"
                   :style="m.loading ? {} : { borderColor: modelColor(m.id), color: modelColor(m.id), backgroundColor: 'transparent' }"
                   :class="m.loading ? 'btn-disabled' : ''"
                   @click="m.loaded ? unloadModel(m.id) : loadModel(m.id)"
@@ -140,18 +141,32 @@
 
       <!-- Right panel -->
       <div class="flex-1 space-y-4 min-w-0">
-        <!-- GPU charts row -->
-        <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
-          <div class="card bg-base-200 border border-base-300">
-            <div class="card-body p-4 gap-1">
-              <h2 class="text-xs font-semibold uppercase tracking-wider opacity-60">GPU Utilization</h2>
-              <div ref="gpuUtilChart" class="chart-container"></div>
-            </div>
-          </div>
-          <div class="card bg-base-200 border border-base-300">
-            <div class="card-body p-4 gap-1">
-              <h2 class="text-xs font-semibold uppercase tracking-wider opacity-60">GPU VRAM</h2>
-              <div ref="gpuVramChart" class="chart-container"></div>
+        <!-- GPU charts row: utilization + VRAM share one box (with a per-GPU
+             selector when there are multiple GPUs); status is its own box. -->
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+          <div class="card bg-base-200 border border-base-300 lg:col-span-2">
+            <div class="card-body p-4 gap-2">
+              <div class="flex items-center justify-between flex-wrap gap-2">
+                <div class="flex items-center gap-2 min-w-0">
+                  <h2 class="text-xs font-semibold uppercase tracking-wider opacity-60">GPU</h2>
+                  <span class="text-xs opacity-50 font-mono truncate" :title="selectedGpuName">{{ selectedGpuName }}</span>
+                </div>
+                <div v-if="gpus.length > 1" class="seg" style="margin: 0">
+                  <button v-for="g in gpus" :key="g.index" class="seg-btn"
+                    :class="{ active: g.index === selectedGpu }"
+                    :title="g.name" @click="selectGpu(g.index)">GPU {{ g.index }}</button>
+                </div>
+              </div>
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <div class="text-[0.65rem] font-semibold uppercase tracking-wider opacity-40 mb-1">Utilization</div>
+                  <div ref="gpuUtilChart" class="chart-container"></div>
+                </div>
+                <div>
+                  <div class="text-[0.65rem] font-semibold uppercase tracking-wider opacity-40 mb-1">VRAM</div>
+                  <div ref="gpuVramChart" class="chart-container"></div>
+                </div>
+              </div>
             </div>
           </div>
           <div class="card bg-base-200 border border-base-300">
@@ -284,6 +299,8 @@
         const routerPorts = ref([]);
         const routerLoading = ref(null); // 'start' | 'stop' | 'restart' | null
         const models = ref([]);
+        const gpus = ref([]);            // [{ index, name, total_vram_mb, util_history, vram_history }]
+        const selectedGpu = ref(0);      // index of the GPU shown in the util/VRAM charts
         const history = ref([]);
         const historyModel = ref('');
         const historySort = ref({ key: 'request_time', asc: false });
@@ -311,6 +328,24 @@
             stopping: p.peach, inactive: p.surface2, error: p.red,
           };
         };
+
+        // The GPU whose history feeds the util/VRAM charts (falls back to the first).
+        const currentGpu = () => gpus.value.find(g => g.index === selectedGpu.value) || gpus.value[0] || null;
+        const selectedGpuName = computed(() => {
+          const g = currentGpu();
+          return g ? g.name : 'No GPU';
+        });
+
+        /**
+         * Selects which GPU the util/VRAM charts display and redraws them.
+         *
+         * @param {number} idx  - the GPU index to show
+         * @returns {void}
+         */
+        function selectGpu(idx) {
+          selectedGpu.value = idx;
+          updateGpuCharts();
+        }
 
         function modelColor(modelId) {
           if (!modelColorMap[modelId]) {
@@ -489,7 +524,7 @@
           vramChart = echarts.init(gpuVramChart.value, null, { renderer: 'canvas' });
           stsChart  = echarts.init(statusChart.value,  null, { renderer: 'canvas' });
           hstChart  = echarts.init(historyChart.value,  null, { renderer: 'canvas' });
-          updateGpuCharts({ util_history: [], vram_history: [], total_vram_mb: 0 });
+          updateGpuCharts();
           updateStatusChart({ entries: [] });
           updateHistoryChart();
         }
@@ -505,7 +540,12 @@
         async function fetchGpu() {
           try {
             const data = await (await fetch('/router/gpu')).json();
-            if (!data.error) updateGpuCharts(data);
+            gpus.value = data.gpus || [];
+            // Keep the selection valid as GPUs appear/disappear.
+            if (!gpus.value.some(g => g.index === selectedGpu.value)) {
+              selectedGpu.value = gpus.value.length ? gpus.value[0].index : 0;
+            }
+            updateGpuCharts();
           } catch {}
         }
 
@@ -516,9 +556,13 @@
           } catch {}
         }
 
-        function updateGpuCharts(data) {
+        // Redraws the util + VRAM charts for the currently selected GPU.
+        function updateGpuCharts() {
           if (!utilChart || !vramChart) return;
           const p = pal();
+          const gpu = currentGpu();
+          const utilHistory = gpu ? gpu.util_history : [];
+          const vramHistory = gpu ? gpu.vram_history : [];
 
           utilChart.setOption({
             ...baseOpts(),
@@ -533,11 +577,11 @@
             series: [{
               type: 'line', showSymbol: false, smooth: 0.3, lineStyle: { color: p.blue, width: 1.5 },
               areaStyle: { color: areaGradient(p.blue, '30', '05') },
-              data: (data.util_history || []).map(([t, v]) => [t * 1000, v]),
+              data: utilHistory.map(([t, v]) => [t * 1000, v]),
             }],
           });
 
-          const totalVram = data.total_vram_mb || 1;
+          const totalVram = (gpu && gpu.total_vram_mb) || 1;
           vramChart.setOption({
             ...baseOpts(),
             tooltip: { ...baseOpts().tooltip, trigger: 'axis',
@@ -554,7 +598,7 @@
             series: [{
               type: 'line', showSymbol: false, smooth: 0.3, lineStyle: { color: p.teal, width: 1.5 },
               areaStyle: { color: areaGradient(p.teal, '30', '05') },
-              data: (data.vram_history || []).map(([t, v]) => [t * 1000, v]),
+              data: vramHistory.map(([t, v]) => [t * 1000, v]),
               markLine: {
                 silent: true, symbol: 'none',
                 data: [{ yAxis: totalVram, lineStyle: { color: p.red, type: 'dashed', width: 1, opacity: 0.5 } }],
@@ -728,6 +772,7 @@
         return {
           ui, themeNames, modeOptions, sizeOptions, swatchStyle, selectTheme, selectVariant, selectFontSize,
           routerStatus, routerPorts, routerLoading, models, history, historyModel,
+          gpus, selectedGpu, selectedGpuName, selectGpu,
           historySort, historyChartMode, statusColor, statusDotClass, sortedHistory,
           formatTime, fetchHistory, routerAction, modelColor,
           loadModel, unloadModel, resetHistory, sortHistory, updateHistoryChart,

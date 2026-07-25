@@ -217,8 +217,9 @@ const LRTheme = {
   _emit() { this._listeners.forEach(cb => { try { cb(); } catch (e) { /* isolate */ } }); },
 
   /**
-   * Applies saved state and wires the OS-preference listener so 'system' mode
-   * tracks the theme live. Safe to call once at startup.
+   * Applies saved state, wires the OS-preference listener so 'system' mode
+   * tracks the theme live, and makes the "Aa" popover dismiss on outside-click
+   * or Escape. Safe to call once at startup.
    *
    * @returns {void}
    */
@@ -226,6 +227,18 @@ const LRTheme = {
     this.apply();
     window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
       if (this.state.variantMode === 'system') { this.apply(); this._emit(); }
+    });
+    // The appearance popover is a native <details>, which stays open until its
+    // summary is clicked again; close it on any click outside it or on Escape.
+    document.addEventListener('click', (e) => {
+      document.querySelectorAll('details.settings-menu[open]').forEach(d => {
+        if (!d.contains(e.target)) d.removeAttribute('open');
+      });
+    });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') {
+        document.querySelectorAll('details.settings-menu[open]').forEach(d => d.removeAttribute('open'));
+      }
     });
   },
 };
