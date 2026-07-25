@@ -24,7 +24,7 @@ class GPUMonitor:
         if not _PYNVML_AVAILABLE:
             raise RuntimeError("pynvml is not installed")
         pynvml.nvmlInit()
-        count = pynvml.nvmlDeviceGetDeviceCount()
+        count = pynvml.nvmlDeviceGetCount()
         if count == 0:
             raise RuntimeError("no NVIDIA GPUs detected")
         # One state dict per GPU. util_history/vram_history are the flushed rolling
