@@ -32,9 +32,14 @@ class GPUMonitor:
         self.gpus: list[dict] = []
         for i in range(count):
             handle = pynvml.nvmlDeviceGetHandleByIndex(i)
-            name = pynvml.nvmlDeviceGetName(handle)
-            if isinstance(name, bytes):  # older pynvml returns bytes
-                name = name.decode()
+            # Name is cosmetic — never let a driver/pynvml quirk here abort the
+            # whole monitor (that would drop GPU detection entirely).
+            try:
+                name = pynvml.nvmlDeviceGetName(handle)
+                if isinstance(name, bytes):  # older pynvml returns bytes
+                    name = name.decode()
+            except Exception:
+                name = f"GPU {i}"
             self.gpus.append({
                 "index": i,
                 "handle": handle,

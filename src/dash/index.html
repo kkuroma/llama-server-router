@@ -111,11 +111,15 @@
           </div>
         </div>
 
-        <!-- Models: flex-1 so it fills the column; list scrolls past overflow -->
-        <div class="card bg-base-200 border border-base-300 flex-1 min-h-0 overflow-hidden">
-          <div class="card-body p-4 gap-3 min-h-0">
+        <!-- Models: fills the left column and scrolls internally. On lg the scroll
+             pane is absolutely positioned so a long model list can't inflate the
+             column past the right panel — keeping the dashboard a neat rectangle.
+             On mobile it flows normally with a height cap. -->
+        <div class="card bg-base-200 border border-base-300 lg:flex-1 lg:min-h-0 overflow-hidden">
+          <div class="card-body p-4 gap-3 min-h-0 flex-1">
             <h2 class="text-xs font-semibold uppercase tracking-wider opacity-60 flex-shrink-0">Models</h2>
-            <div class="space-y-2 overflow-y-auto flex-1 min-h-0 pr-1 lg:max-h-none max-h-96">
+            <div class="relative min-h-0 lg:flex-1">
+              <div class="space-y-2 overflow-y-auto pr-1 max-h-96 lg:max-h-none lg:absolute lg:inset-0">
               <div v-for="m in models" :key="m.id"
                 class="model-row flex items-center justify-between p-2 rounded-lg bg-base-100/50"
                 :style="{ borderLeftColor: modelColor(m.id) }">
@@ -133,7 +137,8 @@
                   <span v-else class="text-xs">{{ m.loaded ? 'Unload' : 'Load' }}</span>
                 </button>
               </div>
-              <div v-if="models.length === 0" class="text-xs opacity-40 text-center py-2">No models</div>
+                <div v-if="models.length === 0" class="text-xs opacity-40 text-center py-2">No models</div>
+              </div>
             </div>
           </div>
         </div>

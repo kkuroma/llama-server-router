@@ -2,6 +2,7 @@ import asyncio
 import os
 import signal
 import sys
+import traceback
 
 import uvicorn
 
@@ -60,9 +61,12 @@ async def main():
     try:
         gpu_monitor = GPUMonitor()
         api.gpu_monitor = gpu_monitor
-        print("[main] GPU monitor initialized", flush=True)
+        names = ", ".join(f"{g['index']}:{g['name']}" for g in gpu_monitor.gpus)
+        print(f"[main] GPU monitor initialized ({gpu_monitor.gpu_count} GPU(s): {names})", flush=True)
     except Exception as exc:
         gpu_monitor = None
+        # Full traceback so a partial NVML failure is diagnosable from the logs.
+        traceback.print_exc()
         print(f"[main] GPU monitor unavailable: {exc}", flush=True)
 
     status_timeline = StatusTimeline()
