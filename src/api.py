@@ -3,9 +3,14 @@ from pathlib import Path
 
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse, Response, HTMLResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from router import LLMRouter
 
 app = FastAPI()
+
+# Shared web UI assets (fonts + design-language CSS/JS) for /dash and /translate.
+# Mounted before the catch-all proxy so /webui/* is served locally, not forwarded.
+app.mount("/webui", StaticFiles(directory=Path(__file__).parent / "webui"), name="webui")
 router: LLMRouter | None = None
 gpu_monitor = None  # set by main.py
 status_timeline = None  # set by main.py

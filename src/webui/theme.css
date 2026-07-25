@@ -1,0 +1,155 @@
+/**
+ * Shared design language for the router web UIs, ported from kuroma's personal
+ * site: Google Sans Flex / Maple Mono, the seasonal palette as CSS variables,
+ * a floating pill navbar, rounded cards, and the "Aa" appearance popover.
+ *
+ * daisyUI still renders the components; its fallback colour variables are
+ * aliased onto the seasonal palette below so one theme source drives everything.
+ * theme.js overrides the --base/--primary/... vars on <html> per theme+variant.
+ */
+
+@font-face {
+  font-family: 'Google Sans Flex';
+  src: url('/webui/fonts/GoogleSansFlex.woff2') format('woff2');
+  font-weight: 100 900; font-display: swap;
+}
+@font-face {
+  font-family: 'Maple Mono'; src: url('/webui/fonts/MapleMono-Regular.woff2') format('woff2');
+  font-weight: 400; font-style: normal; font-display: swap;
+}
+@font-face {
+  font-family: 'Maple Mono'; src: url('/webui/fonts/MapleMono-Italic.woff2') format('woff2');
+  font-weight: 400; font-style: italic; font-display: swap;
+}
+@font-face {
+  font-family: 'Maple Mono'; src: url('/webui/fonts/MapleMono-Medium.woff2') format('woff2');
+  font-weight: 500; font-style: normal; font-display: swap;
+}
+@font-face {
+  font-family: 'Maple Mono'; src: url('/webui/fonts/MapleMono-SemiBold.woff2') format('woff2');
+  font-weight: 600; font-style: normal; font-display: swap;
+}
+@font-face {
+  font-family: 'Maple Mono'; src: url('/webui/fonts/MapleMono-Bold.woff2') format('woff2');
+  font-weight: 700; font-style: normal; font-display: swap;
+}
+
+/* Default palette (Natsumikan dark) so the first paint is themed before JS runs;
+   theme.js overrides these inline on <html> for the saved theme. */
+:root {
+  --base: #0D1017; --mantle: #171D26; --crust: #0A0C12; --text: #D1D1C7;
+  --subtext1: #babcb9; --subtext0: #8E959E; --surface2: #464B5D; --surface1: #253040;
+  --surface0: #242C3A; --overlay2: #8E959E; --overlay1: #6e7481; --overlay0: #5c6170;
+  --primary: #F5803E; --secondary: #FFB454; --tertiary: #39BAE6; --red: #FF5370;
+  --maroon: #D9707E; --peach: #ff8d5f; --yellow: #FFB454; --green: #AAD94C;
+  --teal: #4DD0B0; --sky: #6BD2F0; --sapphire: #4FA6E8; --blue: #73B8FF;
+  --lavender: #A6ACF0; --mauve: #C792EA; --pink: #F58EC0; --flamingo: #F2A788; --rosewater: #E8C0B8;
+  --font-size-base: 16px;
+}
+
+/* Alias daisyUI's fallback colours onto the seasonal palette. daisyUI utilities
+   read var(--fallback-*) when the oklch theme vars are unset, so aliasing here
+   recolours every component from the palette above. --crust reads well as the
+   on-accent text colour in both light and dark variants. */
+[data-theme="seasons"] {
+  --fallback-b1: var(--base);      --fallback-b2: var(--mantle);   --fallback-b3: var(--crust);
+  --fallback-bc: var(--text);
+  --fallback-p:  var(--primary);   --fallback-pc: var(--crust);
+  --fallback-s:  var(--secondary); --fallback-sc: var(--crust);
+  --fallback-a:  var(--tertiary);  --fallback-ac: var(--crust);
+  --fallback-n:  var(--surface0);  --fallback-nc: var(--text);
+  --fallback-in: var(--sky);       --fallback-inc: var(--crust);
+  --fallback-su: var(--green);     --fallback-suc: var(--crust);
+  --fallback-wa: var(--yellow);    --fallback-wac: var(--crust);
+  --fallback-er: var(--red);       --fallback-erc: var(--crust);
+}
+
+html { font-size: var(--font-size-base, 16px); }
+body {
+  font-family: 'Google Sans Flex', 'Noto Sans', -apple-system, 'Segoe UI', sans-serif;
+  line-height: 1.6; transition: background-color 0.3s, color 0.3s;
+}
+code, pre, kbd, samp, .font-mono, .mono { font-family: 'Maple Mono', ui-monospace, monospace; }
+
+/* Subtler scrollbar */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--overlay0); border-radius: 3px; }
+
+/* Floating pill navbar (replaces the daisyUI top bar) */
+.lr-navbar {
+  display: flex; align-items: center; justify-content: space-between; gap: 0.75rem;
+  padding: 0.6rem 1.25rem; background: var(--mantle); border: 1px solid var(--overlay0);
+  position: sticky; top: 0.75rem; z-index: 1000; border-radius: 9999px;
+  width: calc(100% - 2rem); max-width: 1400px; margin: 0.75rem auto 0;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+}
+.lr-brand { display: flex; align-items: center; gap: 0.5rem; min-width: 0; }
+.lr-brand-name { font-weight: 700; letter-spacing: -0.01em; color: var(--primary); }
+.lr-nav-links { display: flex; align-items: center; gap: 0.25rem; }
+.nav-link {
+  color: var(--subtext0); text-decoration: none; border-radius: 9999px;
+  padding: 0.3rem 0.85rem; font-size: 0.8rem; font-weight: 500;
+  transition: background-color 0.15s, color 0.15s;
+}
+.nav-link:hover { background: var(--surface0); color: var(--text); }
+.nav-link.active { background: var(--surface1); color: var(--primary); font-weight: 600; }
+
+/* "Aa" appearance popover: palette swatches + segmented mode/size toggles */
+.settings-menu { position: relative; }
+.settings-menu > summary { list-style: none; cursor: pointer; }
+.settings-menu > summary::-webkit-details-marker { display: none; }
+.settings-toggle {
+  border: 1px solid var(--overlay0); border-radius: 9999px; background: var(--surface0);
+  color: var(--text); font-family: inherit; font-size: 0.85rem; font-weight: 600;
+  padding: 0.35rem 0.85rem; transition: all 0.2s; user-select: none; line-height: 1;
+}
+.settings-menu[open] .settings-toggle, .settings-toggle:hover { background: var(--surface1); }
+.settings-body {
+  position: absolute; right: 0; top: calc(100% + 10px); background: var(--mantle);
+  border: 1px solid var(--surface2); border-radius: 16px; box-shadow: 0 12px 34px rgba(0,0,0,0.25);
+  padding: 0.5rem; min-width: 214px; z-index: 1200; display: flex; flex-direction: column; gap: 2px;
+}
+.settings-label {
+  font-size: 0.66rem; letter-spacing: 0.7px; text-transform: uppercase;
+  color: var(--overlay1); padding: 0.5rem 0.7rem 0.15rem;
+}
+.settings-row { display: flex; gap: 0.5rem; padding: 0.2rem 0.7rem 0.4rem; align-items: center; flex-wrap: wrap; }
+.swatch {
+  width: 26px; height: 26px; border-radius: 50%; border: 2px solid transparent;
+  cursor: pointer; padding: 0; transition: transform 0.15s;
+}
+.swatch:hover { transform: scale(1.12); }
+.swatch.active { border-color: var(--text); }
+.seg {
+  display: flex; border: 1px solid var(--surface2); border-radius: 9999px; overflow: hidden;
+  margin: 0.25rem 0.7rem 0.4rem;
+}
+.seg-btn {
+  flex: 1; border: 0; background: none; padding: 0.34rem 0.5rem; font: inherit;
+  font-size: 0.8rem; color: var(--subtext0); cursor: pointer; transition: all 0.15s; white-space: nowrap;
+}
+.seg-btn:hover { color: var(--text); }
+.seg-btn.active { background: var(--surface1); color: var(--text); font-weight: 600; }
+
+/* Rounded cards in the personal-site "box" idiom: mantle fill, overlay border,
+   16px radius, lift on hover. Overrides daisyUI's flatter .card defaults. */
+.card {
+  background: var(--mantle); border: 1px solid var(--overlay0); border-radius: 16px;
+  transition: box-shadow 0.2s, border-color 0.2s;
+}
+.card:hover { box-shadow: 0 4px 16px rgba(0,0,0,0.18); }
+
+/* Pill controls to echo the navbar */
+.btn { border-radius: 9999px; }
+.select, .input, .textarea { border-radius: 12px; }
+.textarea { font-family: inherit; }
+
+/* Softer table rows */
+.table :where(tbody tr) { border-color: color-mix(in srgb, var(--overlay0) 30%, transparent); }
+
+@media (max-width: 640px) {
+  .lr-navbar { padding: 0.5rem 0.85rem; gap: 0.4rem; top: 0.5rem; width: calc(100% - 1rem); }
+  .lr-brand-name { font-size: 0.9rem; }
+  .nav-link { padding: 0.3rem 0.6rem; font-size: 0.72rem; }
+}

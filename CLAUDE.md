@@ -35,9 +35,10 @@ Config comes entirely from env vars + two config files (no CLI flags):
 Four modules under `src/`, wired together in `main.py`:
 
 - **`router.py` — `LLMRouter`**: the whole scheduler and process supervisor. This is where nearly all logic lives (~800 lines). Everything else is thin.
-- **`api.py`**: FastAPI app. Custom endpoints (`/router/*`, `/models/load`, `/models/unload`, `/dash`, `/translate`, `/v1/models`) plus a **catch-all `/{full_path}` proxy** that wraps every other request into an "envelope" dict and hands it to `router.add_request()`. `api.router`/`api.gpu_monitor`/etc. are module-level globals set by `main.py` at startup.
+- **`api.py`**: FastAPI app. Custom endpoints (`/router/*`, `/models/load`, `/models/unload`, `/dash`, `/translate`, `/v1/models`), a **`/webui` StaticFiles mount** (shared UI assets — see below), plus a **catch-all `/{full_path}` proxy** that wraps every other request into an "envelope" dict and hands it to `router.add_request()`. The `/webui` mount is registered before the catch-all so its paths are served locally, not forwarded. `api.router`/`api.gpu_monitor`/etc. are module-level globals set by `main.py` at startup.
 - **`monitor.py`**: `GPUMonitor` (NVML util/VRAM history) and `StatusTimeline` (router status changes). Polled once/sec from a background task in `main.py`. Both keep a 2-hour rolling window; **GPUMonitor only reads GPU index 0**.
 - **`translate/`**: self-contained translation feature (service + SPA + `languages.csv` + `prompt.txt`). Builds a 3-chunk message array designed for llama.cpp prompt caching, then routes it through the normal request queue.
+- **`webui/`**: shared design language for the `/dash` and `/translate` SPAs (served under `/webui`): `theme.css` (fonts + seasonal palette + pill navbar + card/popover styles), `theme.js` (`window.LRTheme` — the shunka-shuutou palette, localStorage state under `llama-router-ui`, and the "Aa" appearance popover: theme swatches, light/dark/auto mode, text size), and `fonts/` (Google Sans Flex + Maple Mono woff2). daisyUI's `--fallback-*` colour vars are aliased onto the palette in `theme.css`, so one theme source recolours every component; charts read the active palette via `LRTheme.colors()`.
 
 ### Request lifecycle (the core loop)
 

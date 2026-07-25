@@ -1,140 +1,70 @@
 <!DOCTYPE html>
-<html lang="en" data-theme="mocha">
+<html lang="en" data-theme="seasons">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>LLaMa Router — Dashboard</title>
+  <!-- Seasonal design language (fonts + palette + pill navbar + Aa popover).
+       theme.js is loaded synchronously and init()'d here so the saved palette
+       is applied before first paint (no flash). -->
+  <link rel="preload" href="/webui/fonts/GoogleSansFlex.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="/webui/theme.css" />
+  <script src="/webui/theme.js"></script>
+  <script>window.LRTheme.init();</script>
   <link href="https://cdn.jsdelivr.net/npm/daisyui@4/dist/full.min.css" rel="stylesheet" />
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://cdn.jsdelivr.net/npm/vue@3/dist/vue.global.prod.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
-  <script>
-    tailwind.config = {
-      theme: { extend: {} },
-    };
-  </script>
-  <script>
-    // Apply saved theme before first paint to avoid flash
-    (function() {
-      const saved = localStorage.getItem('llama-router-theme');
-      if (saved) document.documentElement.setAttribute('data-theme', saved);
-    })();
-  </script>
+  <script>tailwind.config = { theme: { extend: {} } };</script>
   <style>
-    /* Catppuccin Mocha */
-    [data-theme="mocha"] {
-      --fallback-b1: #1e1e2e;
-      --fallback-b2: #181825;
-      --fallback-b3: #11111b;
-      --fallback-bc: #cdd6f4;
-      --fallback-p: #89b4fa;
-      --fallback-pc: #1e1e2e;
-      --fallback-s: #a6e3a1;
-      --fallback-sc: #1e1e2e;
-      --fallback-a: #f9e2af;
-      --fallback-ac: #1e1e2e;
-      --fallback-n: #313244;
-      --fallback-nc: #cdd6f4;
-      --fallback-in: #89dceb;
-      --fallback-inc: #1e1e2e;
-      --fallback-su: #a6e3a1;
-      --fallback-suc: #1e1e2e;
-      --fallback-wa: #f9e2af;
-      --fallback-wac: #1e1e2e;
-      --fallback-er: #f38ba8;
-      --fallback-erc: #1e1e2e;
-      color-scheme: dark;
-    }
-    /* Catppuccin Latte */
-    [data-theme="latte"] {
-      --fallback-b1: #eff1f5;
-      --fallback-b2: #e6e9ef;
-      --fallback-b3: #dce0e8;
-      --fallback-bc: #4c4f69;
-      --fallback-p: #1e66f5;
-      --fallback-pc: #eff1f5;
-      --fallback-s: #40a02b;
-      --fallback-sc: #eff1f5;
-      --fallback-a: #df8e1d;
-      --fallback-ac: #eff1f5;
-      --fallback-n: #ccd0da;
-      --fallback-nc: #4c4f69;
-      --fallback-in: #04a5e5;
-      --fallback-inc: #eff1f5;
-      --fallback-su: #40a02b;
-      --fallback-suc: #eff1f5;
-      --fallback-wa: #df8e1d;
-      --fallback-wac: #eff1f5;
-      --fallback-er: #d20f39;
-      --fallback-erc: #eff1f5;
-      color-scheme: light;
-    }
     .chart-container { width: 100%; height: 220px; }
-    /* Softer table rows */
-    .table :where(tbody tr) { border-color: oklch(var(--b3) / 0.3); }
-    /* Subtler scrollbar */
-    ::-webkit-scrollbar { width: 6px; height: 6px; }
-    ::-webkit-scrollbar-track { background: transparent; }
-    ::-webkit-scrollbar-thumb { background: oklch(var(--n)); border-radius: 3px; }
-
-    /* Navbar link styling */
-    .nav-link {
-      transition: background-color 0.15s, color 0.15s;
-      border-radius: 0.5rem;
-      padding: 0.25rem 0.75rem;
-      font-size: 0.75rem;
-      font-weight: 500;
-    }
-    [data-theme="mocha"] .nav-link {
-      color: #a6adc8;
-    }
-    [data-theme="mocha"] .nav-link:hover {
-      background-color: #313244;
-      color: #cdd6f4;
-    }
-    [data-theme="mocha"] .nav-link.active {
-      background-color: #45475a;
-      color: #cdd6f4;
-    }
-    [data-theme="latte"] .nav-link {
-      color: #6c6f85;
-    }
-    [data-theme="latte"] .nav-link:hover {
-      background-color: #ccd0da;
-      color: #4c4f69;
-    }
-    [data-theme="latte"] .nav-link.active {
-      background-color: #bcc0cc;
-      color: #4c4f69;
-    }
-
     /* Model color dot stripe on model rows */
-    .model-row {
-      border-left: 3px solid transparent;
-    }
+    .model-row { border-left: 3px solid transparent; }
   </style>
 </head>
 <body class="min-h-screen bg-base-100 text-base-content">
   <div id="app">
-    <!-- Navbar -->
-    <div class="navbar bg-base-200/80 backdrop-blur border-b border-base-300 px-4 sticky top-0 z-50">
-      <div class="flex-1 gap-2 items-center">
-        <span class="text-base font-semibold tracking-tight opacity-90">LLaMa Router</span>
-        <div class="flex items-center gap-1.5 ml-1">
-          <span class="text-sm opacity-60">(</span>
+    <!-- Floating pill navbar -->
+    <div class="lr-navbar">
+      <div class="lr-brand">
+        <span class="lr-brand-name">LLaMa Router</span>
+        <div class="flex items-center gap-1.5">
+          <span class="opacity-50 text-sm">(</span>
           <div class="w-2 h-2 rounded-full flex-shrink-0" :class="statusDotClass"></div>
           <span class="font-mono text-sm opacity-70">{{ routerStatus }}</span>
-          <span class="text-sm opacity-60">)</span>
+          <span class="opacity-50 text-sm">)</span>
         </div>
       </div>
-      <div class="flex-none gap-1">
-        <a href="/" class="nav-link">Chat</a>
-        <a href="/dash" class="nav-link active">Dashboard</a>
-        <a href="/translate" class="nav-link">Translate</a>
-        <button class="btn btn-ghost btn-sm btn-square ml-1" @click="toggleTheme" :title="darkMode ? 'Light mode' : 'Dark mode'">
-          <svg v-if="darkMode" class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z"/></svg>
-          <svg v-else class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"/></svg>
-        </button>
+      <div class="flex items-center gap-2">
+        <nav class="lr-nav-links">
+          <a href="/" class="nav-link">Chat</a>
+          <a href="/dash" class="nav-link active">Dashboard</a>
+          <a href="/translate" class="nav-link">Translate</a>
+        </nav>
+        <!-- "Aa" appearance popover: palette / mode / text size -->
+        <details class="settings-menu">
+          <summary class="settings-toggle" title="Appearance">Aa</summary>
+          <div class="settings-body">
+            <div class="settings-label">Palette</div>
+            <div class="settings-row">
+              <button v-for="name in themeNames" :key="name" class="swatch"
+                :class="{ active: name === ui.theme }" :style="swatchStyle(name)"
+                :title="name" @click.prevent="selectTheme(name)"></button>
+            </div>
+            <div class="settings-label">Mode</div>
+            <div class="seg">
+              <button v-for="opt in modeOptions" :key="opt.value" class="seg-btn"
+                :class="{ active: opt.value === ui.variantMode }"
+                @click.prevent="selectVariant(opt.value)">{{ opt.label }}</button>
+            </div>
+            <div class="settings-label">Text size</div>
+            <div class="seg">
+              <button v-for="opt in sizeOptions" :key="opt.value" class="seg-btn"
+                :class="{ active: opt.value === ui.fontSize }"
+                @click.prevent="selectFontSize(opt.value)">{{ opt.label }}</button>
+            </div>
+          </div>
+        </details>
       </div>
     </div>
 
@@ -301,44 +231,55 @@
   </div>
 
   <script>
-    // Catppuccin palette refs for charts
-    const CTP = {
-      mocha: {
-        text: '#cdd6f4', subtext: '#a6adc8', surface0: '#313244', surface1: '#45475a',
-        overlay0: '#6c7086', base: '#1e1e2e', mantle: '#181825', crust: '#11111b',
-        blue: '#89b4fa', green: '#a6e3a1', red: '#f38ba8', yellow: '#f9e2af',
-        mauve: '#cba6f7', teal: '#94e2d5', peach: '#fab387', lavender: '#b4befe',
-        sapphire: '#74c7ec', sky: '#89dceb', pink: '#f5c2e7', flamingo: '#f2cdcd',
-        rosewater: '#f5e0dc', maroon: '#eba0ac',
-      },
-      latte: {
-        text: '#4c4f69', subtext: '#6c6f85', surface0: '#ccd0da', surface1: '#bcc0cc',
-        overlay0: '#7c7f93', base: '#eff1f5', mantle: '#e6e9ef', crust: '#dce0e8',
-        blue: '#1e66f5', green: '#40a02b', red: '#d20f39', yellow: '#df8e1d',
-        mauve: '#8839ef', teal: '#179299', peach: '#fe640b', lavender: '#7287fd',
-        sapphire: '#209fb5', sky: '#04a5e5', pink: '#ea76cb', flamingo: '#dd7878',
-        rosewater: '#dc8a78', maroon: '#e64553',
-      },
-    };
-
-    // Color palette for model color-coding (cycles through these)
+    // Color palette for model color-coding (cycles through the seasonal palette's
+    // named hues). All keys exist in every theme/variant (see theme.js).
     const MODEL_COLOR_KEYS = ['blue', 'green', 'mauve', 'peach', 'teal', 'pink', 'sapphire', 'yellow', 'lavender', 'flamingo', 'sky', 'maroon', 'rosewater', 'red'];
 
-    const STATUS_COLORS_MOCHA = {
-      idle: '#89b4fa', serving: '#a6e3a1', starting: '#f9e2af',
-      stopping: '#fab387', inactive: '#45475a', error: '#f38ba8',
-    };
-    const STATUS_COLORS_LATTE = {
-      idle: '#1e66f5', serving: '#40a02b', starting: '#df8e1d',
-      stopping: '#fe640b', inactive: '#bcc0cc', error: '#d20f39',
-    };
-
+    const T = window.LRTheme;
     const { createApp, ref, reactive, computed, onMounted, onUnmounted, nextTick } = Vue;
 
     createApp({
       setup() {
-        const savedTheme = localStorage.getItem('llama-router-theme');
-        const darkMode = ref(savedTheme ? savedTheme === 'mocha' : true);
+        // "Aa" appearance popover state (mirrors LRTheme.state for active-highlighting)
+        const ui = reactive({ ...T.state });
+        const themeNames = T.themeNames;
+        const modeOptions = [{ value: 'light', label: 'Light' }, { value: 'dark', label: 'Dark' }, { value: 'system', label: 'Auto' }];
+        const sizeOptions = [{ value: 'small', label: 'S' }, { value: 'medium', label: 'M' }, { value: 'large', label: 'L' }, { value: 'xlarge', label: 'XL' }];
+        /**
+         * Builds the diagonal light/dark accent gradient shown on a palette swatch.
+         *
+         * @param {string} name  - the theme name whose accents to preview
+         * @returns {object} an inline-style object with the gradient background
+         */
+        const swatchStyle = (name) => {
+          const t = T.THEMES[name];
+          return { background: `linear-gradient(135deg, ${t.light.primary} 50%, ${t.dark.primary} 50%)` };
+        };
+
+        /**
+         * Applies a palette selection and mirrors it into `ui` for highlighting.
+         *
+         * @param {string} n  - the theme name to activate
+         * @returns {void}
+         */
+        const selectTheme = (n) => { T.setTheme(n); ui.theme = T.state.theme; };
+
+        /**
+         * Applies a variant-mode selection and mirrors it into `ui`.
+         *
+         * @param {'light'|'dark'|'system'} m  - the variant mode to activate
+         * @returns {void}
+         */
+        const selectVariant = (m) => { T.setVariant(m); ui.variantMode = T.state.variantMode; };
+
+        /**
+         * Applies a text-size selection and mirrors it into `ui`.
+         *
+         * @param {string} s  - the font-size key to activate
+         * @returns {void}
+         */
+        const selectFontSize = (s) => { T.setFontSize(s); ui.fontSize = T.state.fontSize; };
+
         const routerStatus = ref('unknown');
         const routerPorts = ref([]);
         const routerLoading = ref(null); // 'start' | 'stop' | 'restart' | null
@@ -361,8 +302,15 @@
         const modelColorMap = reactive({});
         let modelColorIdx = 0;
 
-        const pal = () => darkMode.value ? CTP.mocha : CTP.latte;
-        const statusColors = () => darkMode.value ? STATUS_COLORS_MOCHA : STATUS_COLORS_LATTE;
+        // Active seasonal palette; recomputed live so chart rebuilds pick up theme changes.
+        const pal = () => T.colors();
+        const statusColors = () => {
+          const p = T.colors();
+          return {
+            idle: p.blue, serving: p.green, starting: p.yellow,
+            stopping: p.peach, inactive: p.surface2, error: p.red,
+          };
+        };
 
         function modelColor(modelId) {
           if (!modelColorMap[modelId]) {
@@ -406,14 +354,6 @@
           });
           return arr.slice(0, 100); // keep the DOM table light
         });
-
-        function toggleTheme() {
-          darkMode.value = !darkMode.value;
-          const theme = darkMode.value ? 'mocha' : 'latte';
-          document.documentElement.setAttribute('data-theme', theme);
-          localStorage.setItem('llama-router-theme', theme);
-          rebuildCharts();
-        }
 
         function formatTime(ts) {
           const d = new Date(ts * 1000);
@@ -521,7 +461,7 @@
           const p = pal();
           return {
             animation: false,
-            textStyle: { color: p.subtext, fontFamily: 'ui-monospace, monospace', fontSize: 10 },
+            textStyle: { color: p.subtext0, fontFamily: 'ui-monospace, monospace', fontSize: 10 },
             grid: { top: 8, right: 12, bottom: 28, left: 8, containLabel: true },
             tooltip: {
               backgroundColor: p.surface0, borderColor: p.surface1, borderWidth: 1,
@@ -643,7 +583,7 @@
 
           stsChart.setOption({
             animation: false,
-            textStyle: { color: p.subtext, fontFamily: 'ui-monospace, monospace', fontSize: 10 },
+            textStyle: { color: p.subtext0, fontFamily: 'ui-monospace, monospace', fontSize: 10 },
             grid: { top: 8, right: 12, bottom: 28, left: 48 },
             xAxis: {
               type: 'time',
@@ -776,6 +716,8 @@
           window.addEventListener('resize', () => {
             [utilChart, vramChart, stsChart, hstChart].forEach(c => c?.resize());
           });
+          // Recolour charts + model swatches when the palette/variant changes.
+          T.onChange(() => rebuildCharts());
         });
 
         onUnmounted(() => {
@@ -784,9 +726,10 @@
         });
 
         return {
-          darkMode, routerStatus, routerPorts, routerLoading, models, history, historyModel,
+          ui, themeNames, modeOptions, sizeOptions, swatchStyle, selectTheme, selectVariant, selectFontSize,
+          routerStatus, routerPorts, routerLoading, models, history, historyModel,
           historySort, historyChartMode, statusColor, statusDotClass, sortedHistory,
-          toggleTheme, formatTime, fetchHistory, routerAction, modelColor,
+          formatTime, fetchHistory, routerAction, modelColor,
           loadModel, unloadModel, resetHistory, sortHistory, updateHistoryChart,
           gpuUtilChart, gpuVramChart, statusChart, historyChart,
         };
