@@ -1,7 +1,6 @@
 import time
 from pathlib import Path
 
-import httpx
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse, Response, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -162,15 +161,21 @@ async def dashboard():
         raise HTTPException(status_code=404, detail="Dashboard not found")
     return HTMLResponse(html_path.read_text())
 
-# Chat (themed shell + embedded llama.cpp UI)
+# Chat (themed shell + embedded llama.cpp UIs)
 
 @app.get("/chat")
 async def chatPage():
     """
     Serves the chat single-page app
 
-    The shell (navbar + Aa popover + tabbed iframes) is ours; each tab embeds
-    llama.cpp's own web UI via /chatui for quick tok/s testing.
+    The shell (navbar + Aa popover + tabbed iframes) is ours; each tab embeds a
+    live llama-server replica's own web UI DIRECTLY (iframe src points at the
+    instance's own host:port), so the embedded UI's polling/generation traffic
+    never re-enters the router. Routing that traffic through the catch-all made
+    it count as RWLock readers, which starve the write-lock unloadModel needs —
+    leaving the router stuck "serving" and unable to unload. Direct-embedding
+    keeps all UI traffic on the instance; only the load/unload chips (explicit
+    POST routes) touch the router.
 
     Raises:
         HTTPException: 404 if the chat HTML is missing
@@ -179,33 +184,6 @@ async def chatPage():
     if not html_path.exists():
         raise HTTPException(status_code=404, detail="Chat app not found")
     return HTMLResponse(html_path.read_text())
-
-@app.get("/chatui")
-async def chatUi():
-    """
-    Serves llama.cpp's built-in web UI, proxied live from a running instance
-
-    The router hosts no chat UI of its own; it fetches the index HTML from a live
-    llama-server replica so the /chat page can embed it in an iframe. Served at a
-    top-level path so the UI's relative asset requests (./_app/*) resolve to
-    /_app/* and its absolute API calls (/v1/*, /models/load) fall through to the
-    router's catch-all proxy — keeping every request router-governed. Requires at
-    least one loaded instance (the /chat shell shows a "load a model" state until
-    then, so this 503 is only a fallback).
-
-    Raises:
-        HTTPException: 503 if no replica is running, 502 if the fetch fails
-    """
-    r = getRouter()
-    ports = r._sortedPorts()
-    if not ports:
-        raise HTTPException(status_code=503, detail="No model loaded")
-    try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(f"http://0.0.0.0:{ports[0]}/", timeout=10.0)
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"Failed to reach llama.cpp UI: {exc}")
-    return HTMLResponse(resp.text, status_code=resp.status_code)
 
 @app.get("/router/models")
 async def routerModels():

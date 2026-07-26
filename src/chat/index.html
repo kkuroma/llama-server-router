@@ -16,21 +16,16 @@
   <script src="https://cdn.jsdelivr.net/npm/vue@3/dist/vue.global.prod.js"></script>
   <script>tailwind.config = { theme: { extend: {} } };</script>
   <style>
-    /* Session tabs: a compact pill row above the embedded UI. */
+    /* Instance tabs: a compact pill row above the embedded UI. */
     .chat-tab {
       display: flex; align-items: center; gap: 0.4rem;
-      padding: 0.3rem 0.35rem 0.3rem 0.7rem; border-radius: 0.6rem;
+      padding: 0.3rem 0.7rem; border-radius: 0.6rem;
       background: var(--surface0); color: var(--subtext0);
       border: 1px solid transparent; cursor: pointer; white-space: nowrap;
       font-size: 0.8rem; transition: background 0.15s, color 0.15s;
     }
     .chat-tab:hover { background: var(--surface1); }
     .chat-tab.active { background: var(--surface1); color: var(--text); border-color: var(--overlay0); }
-    .chat-tab-close {
-      display: inline-flex; align-items: center; justify-content: center;
-      width: 1.05rem; height: 1.05rem; border-radius: 0.4rem; opacity: 0.5;
-    }
-    .chat-tab-close:hover { opacity: 1; background: var(--surface2); }
     /* The embedded llama.cpp UI fills the remaining space. */
     .chat-frame { width: 100%; height: 100%; border: 0; display: block; background: var(--base); }
   </style>
@@ -105,21 +100,20 @@
         </div>
       </div>
 
-      <!-- Sessions: tab bar + the embedded llama.cpp UI for the active tab -->
+      <!-- Instances: one tab per live llama-server replica; each iframe embeds
+           that replica's own UI directly (never through the router). -->
       <div class="card bg-base-200 border border-base-300 flex-1 min-h-0 flex flex-col overflow-hidden">
         <!-- Tab bar -->
         <div class="flex items-center gap-1.5 p-2 border-b border-base-300 flex-shrink-0 overflow-x-auto">
-          <div v-for="t in tabs" :key="t.id"
-            class="chat-tab" :class="{ active: t.id === activeTab }"
-            @click="selectTab(t.id)">
-            <span>{{ t.title }}</span>
-            <span v-if="tabs.length > 1" class="chat-tab-close"
-              @click.stop="closeTab(t.id)" title="Close session">✕</span>
+          <div v-for="t in instances" :key="t.port"
+            class="chat-tab" :class="{ active: t.port === activeTab }"
+            @click="selectTab(t.port)">
+            <span class="font-mono normal-case">{{ t.model }}</span>
+            <span class="opacity-50 text-xs">:{{ t.port }}</span>
           </div>
-          <button class="btn btn-xs btn-ghost" @click="addTab" title="New session">+</button>
           <div class="flex-1"></div>
           <button class="btn btn-xs btn-ghost opacity-60 hover:opacity-100"
-            @click="reloadActive" title="Reload this session" :disabled="!anyLoaded">↻</button>
+            @click="reloadActive" title="Reload this instance" :disabled="!anyLoaded">↻</button>
         </div>
 
         <!-- Embedded UI area -->
@@ -135,14 +129,15 @@
             <div class="text-sm opacity-70">Load a model first to see the chat UI.</div>
             <div class="text-xs opacity-40">Pick one above, or from the Dashboard.</div>
           </div>
-          <!-- One iframe per session; only the active one is shown so switching
-               tabs doesn't reload the others. Each embeds llama.cpp's UI via
-               /chatui, whose API calls fall through to the router. -->
+          <!-- One iframe per live instance, pointed straight at that replica's
+               own host:port. Only the active one is shown so switching tabs
+               doesn't reload the others. The embedded UI talks to its own
+               instance directly — its traffic never re-enters the router. -->
           <template v-else>
-            <iframe v-for="t in tabs" :key="t.id"
-              v-show="t.id === activeTab"
+            <iframe v-for="t in instances" :key="t.port + '.' + (nonces[t.port] || 0)"
+              v-show="t.port === activeTab"
               class="chat-frame absolute inset-0"
-              :src="'/chatui?s=' + t.id + '.' + t.nonce"
+              :src="frameSrc(t.port)"
               title="llama.cpp chat"></iframe>
           </template>
         </div>
@@ -154,9 +149,9 @@
     const T = window.LRTheme;
     const { createApp, ref, reactive, computed, onMounted, onUnmounted } = Vue;
 
-    // Open sessions persist across reloads (chat history itself lives in the
-    // embedded UI and is intentionally disposable — the real client is elsewhere).
-    const TABS_KEY = 'llama-router-chat-tabs';
+    // Tabs are derived from live router state (one per instance), not persisted:
+    // chat history lives in each embedded UI and is intentionally disposable
+    // (the real client is elsewhere).
 
     createApp({
       setup() {
@@ -202,13 +197,19 @@
         const selectFontSize = (s) => { T.setFontSize(s); ui.fontSize = T.state.fontSize; };
 
         const routerStatus = ref('unknown');
-        const routerPorts = ref([]);
         const models = ref([]);
         const loadingModels = reactive({});
 
-        // True once at least one llama-server replica is live, i.e. there is an
-        // instance whose UI /chatui can embed. Drives the empty state.
-        const anyLoaded = computed(() => routerPorts.value.length > 0);
+        // Live llama-server replicas as [{ port, model }], sorted by port — one
+        // tab / embedded UI each. Rebuilt from /router on every poll.
+        const instances = ref([]);
+        // Per-port reload counter, folded into the iframe src so the ↻ button can
+        // force just the active instance's UI to re-fetch.
+        const nonces = reactive({});
+
+        // True once at least one replica is live, i.e. there is an instance whose
+        // UI we can embed. Drives the empty state.
+        const anyLoaded = computed(() => instances.value.length > 0);
 
         const statusDotClass = computed(() => {
           const map = {
@@ -218,105 +219,56 @@
           return map[routerStatus.value] || 'bg-base-content/20';
         });
 
-        // --- Sessions (tabs) ---
-        const tabs = ref([]);
+        // --- Instance tabs ---
         const activeTab = ref(null);
-        let nextTabId = 1;
 
         /**
-         * Persists the open sessions and next-id counter to localStorage.
+         * Builds the direct URL of a replica's own web UI.
          *
-         * Only tab identity/title is stored; the embedded UI owns conversation
-         * state, so nothing about the chats themselves is saved here.
+         * Points straight at the instance's host:port (this page's hostname, the
+         * replica's port) so the embedded UI's traffic goes to that llama-server
+         * directly and never re-enters the router. The reload nonce is appended
+         * as a query param to force a fresh load on demand.
          *
-         * @returns {void}
+         * @param {number} port  - the replica's port
+         * @returns {string} the absolute URL to embed for that instance
          */
-        function persistTabs() {
-          try {
-            localStorage.setItem(TABS_KEY, JSON.stringify({
-              tabs: tabs.value.map(t => ({ id: t.id, title: t.title })),
-              active: activeTab.value,
-              next: nextTabId,
-            }));
-          } catch {}
+        function frameSrc(port) {
+          const n = nonces[port] || 0;
+          return `${location.protocol}//${location.hostname}:${port}/${n ? '?_r=' + n : ''}`;
         }
 
         /**
-         * Restores sessions from localStorage, seeding a single tab if none.
+         * Makes an instance tab active.
          *
+         * @param {number} port  - the port of the instance to focus
          * @returns {void}
          */
-        function loadTabs() {
-          let saved = null;
-          try { saved = JSON.parse(localStorage.getItem(TABS_KEY) || 'null'); } catch {}
-          if (saved && Array.isArray(saved.tabs) && saved.tabs.length) {
-            tabs.value = saved.tabs.map(t => ({ id: t.id, title: t.title, nonce: 0 }));
-            activeTab.value = saved.active ?? tabs.value[0].id;
-            nextTabId = saved.next ?? (Math.max(...tabs.value.map(t => t.id)) + 1);
-            if (!tabs.value.some(t => t.id === activeTab.value)) activeTab.value = tabs.value[0].id;
-          } else {
-            tabs.value = [{ id: 1, title: 'Session 1', nonce: 0 }];
-            activeTab.value = 1;
-            nextTabId = 2;
-          }
+        function selectTab(port) {
+          activeTab.value = port;
         }
 
         /**
-         * Opens a new session tab and focuses it.
+         * Reloads the active instance's iframe (e.g. after a fresh model load).
          *
-         * @returns {void}
-         */
-        function addTab() {
-          const id = nextTabId++;
-          tabs.value.push({ id, title: `Session ${id}`, nonce: 0 });
-          activeTab.value = id;
-          persistTabs();
-        }
-
-        /**
-         * Closes a session tab, keeping at least one open.
-         *
-         * @param {number} id  - the id of the tab to close
-         * @returns {void}
-         */
-        function closeTab(id) {
-          if (tabs.value.length <= 1) return;
-          const idx = tabs.value.findIndex(t => t.id === id);
-          if (idx === -1) return;
-          tabs.value.splice(idx, 1);
-          if (activeTab.value === id) {
-            activeTab.value = tabs.value[Math.max(0, idx - 1)].id;
-          }
-          persistTabs();
-        }
-
-        /**
-         * Makes a session tab active.
-         *
-         * @param {number} id  - the id of the tab to focus
-         * @returns {void}
-         */
-        function selectTab(id) {
-          activeTab.value = id;
-          persistTabs();
-        }
-
-        /**
-         * Reloads the active session's iframe (e.g. after loading a new model).
-         *
-         * Bumps the tab's nonce, which is part of the iframe src, forcing the
-         * embedded UI to re-fetch without disturbing the other sessions.
+         * Bumps that port's reload nonce, which is part of the iframe src, forcing
+         * the embedded UI to re-fetch without disturbing the other instances.
          *
          * @returns {void}
          */
         function reloadActive() {
-          const t = tabs.value.find(x => x.id === activeTab.value);
-          if (t) t.nonce++;
+          const port = activeTab.value;
+          if (port == null) return;
+          nonces[port] = (nonces[port] || 0) + 1;
         }
 
         // --- Data fetching ---
         /**
-         * Refreshes router status and live instance ports.
+         * Refreshes router status and the live instance list.
+         *
+         * Rebuilds the instance tabs from /router (port -> model), keeping the
+         * active tab if its instance still exists, otherwise falling back to the
+         * first one (or none when nothing is loaded).
          *
          * @returns {Promise<void>}
          */
@@ -324,7 +276,15 @@
           try {
             const data = await (await fetch('/router')).json();
             routerStatus.value = data.status;
-            routerPorts.value = data.ports || [];
+            const map = data.instances || {};
+            instances.value = Object.keys(map)
+              .map(p => ({ port: Number(p), model: map[p] }))
+              .sort((a, b) => a.port - b.port);
+            if (instances.value.length === 0) {
+              activeTab.value = null;
+            } else if (!instances.value.some(t => t.port === activeTab.value)) {
+              activeTab.value = instances.value[0].port;
+            }
           } catch {}
         }
 
@@ -399,7 +359,6 @@
         }
 
         onMounted(async () => {
-          loadTabs();
           await pollAll();
           pollTimer = setInterval(pollAll, 5000);
         });
@@ -409,7 +368,7 @@
         return {
           ui, themeNames, modeOptions, sizeOptions, swatchStyle, selectTheme, selectVariant, selectFontSize,
           routerStatus, models, anyLoaded, statusDotClass,
-          tabs, activeTab, addTab, closeTab, selectTab, reloadActive,
+          instances, activeTab, nonces, selectTab, reloadActive, frameSrc,
           loadModel, unloadModel,
         };
       },
