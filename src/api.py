@@ -126,20 +126,27 @@ async def routerLoad(body: dict):
 # History endpoints
 
 @app.get("/router/history")
-async def routerHistory(model: str | None = None, limit: int = 500):
+async def routerHistory(
+    model: str | None = None,
+    limit: int = 10000,
+    since: float | None = None,
+    until: float | None = None,
+):
     """
-    Returns the most recent request history rows, optionally filtered by model
+    Returns request history rows within a time window, optionally filtered by model
 
     Args:
         model (str | None)  : The model to filter by, or None for all models
         limit (int)         : Max rows to return, clamped to [0, 100000]; 0 means everything
+        since (float | None): Only rows with request_time >= this unix ts, if set
+        until (float | None): Only rows with request_time <= this unix ts, if set
 
     Returns:
         The list of history rows, most recent first
     """
     r = getRouter()
     limit = max(0, min(limit, 100000))
-    return await r.getHistory(model, limit)
+    return await r.getHistory(model, limit, since, until)
 
 @app.get("/router/reset_history")
 async def routerResetHistory():

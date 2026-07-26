@@ -215,29 +215,47 @@ class LLMRouter:
         except Exception as e:
             print(f"[ROUTER] failed to record history: {e}", flush=True)
 
-    async def getHistory(self, model: str | None = None, limit: int = 500) -> list[dict]:
+    async def getHistory(
+        self,
+        model: str | None = None,
+        limit: int = 500,
+        since: float | None = None,
+        until: float | None = None,
+    ) -> list[dict]:
         """
         Returns request-history rows, most recent first
 
         Args:
             model (str | None)  : The model to filter by, or None for all models
             limit (int)         : Max rows to return; 0 means no limit
+            since (float | None): Only rows with request_time >= this unix ts, if set
+            until (float | None): Only rows with request_time <= this unix ts, if set
 
         Returns:
             The list of history rows as dicts
         """
         await self._ensureHistoryDb()
+        clauses: list[str] = []
+        params: list = []
+        if model:
+            clauses.append("model = ?")
+            params.append(model)
+        if since is not None:
+            clauses.append("request_time >= ?")
+            params.append(since)
+        if until is not None:
+            clauses.append("request_time <= ?")
+            params.append(until)
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
         lim = " LIMIT ?" if limit else ""
+        if limit:
+            params.append(limit)
         async with aiosqlite.connect(self._history_db_path) as db:
             db.row_factory = aiosqlite.Row
-            if model:
-                cursor = await db.execute(
-                    f"SELECT * FROM history WHERE model = ? ORDER BY request_time DESC{lim}",
-                    (model, limit) if limit else (model,))
-            else:
-                cursor = await db.execute(
-                    f"SELECT * FROM history ORDER BY request_time DESC{lim}",
-                    (limit,) if limit else ())
+            cursor = await db.execute(
+                f"SELECT * FROM history{where} ORDER BY request_time DESC{lim}",
+                params,
+            )
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
 

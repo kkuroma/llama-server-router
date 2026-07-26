@@ -18,8 +18,19 @@
   <script>tailwind.config = { theme: { extend: {} } };</script>
   <style>
     .chart-container { width: 100%; height: 220px; }
+    /* Request-history plot is taller to make room for the zoom slider + axis. */
+    .history-chart { width: 100%; height: 300px; }
     /* Model color dot stripe on model rows */
     .model-row { border-left: 3px solid transparent; }
+    /* Compact summary stat cell above the history chart. */
+    .stat-cell {
+      display: flex; flex-direction: column; gap: 0.1rem;
+      padding: 0.4rem 0.7rem; border-radius: 0.6rem;
+      background: var(--surface0); border: 1px solid var(--surface1); min-width: 0;
+    }
+    .stat-cell .stat-k { font-size: 0.62rem; text-transform: uppercase; letter-spacing: 0.05em; opacity: 0.55; }
+    .stat-cell .stat-v { font-size: 1.05rem; font-weight: 600; font-family: ui-monospace, monospace; line-height: 1.1; }
+    .stat-cell .stat-v small { font-size: 0.62rem; font-weight: 500; opacity: 0.6; margin-left: 0.15rem; }
   </style>
 </head>
 <body class="min-h-screen bg-base-100 text-base-content">
@@ -187,7 +198,14 @@
           <div class="card-body p-4 gap-3">
             <div class="flex items-center justify-between flex-wrap gap-2">
               <h2 class="text-xs font-semibold uppercase tracking-wider opacity-60">Request History</h2>
-              <div class="flex items-center gap-2">
+              <div class="flex items-center gap-2 flex-wrap">
+                <!-- Time window: sets how far back to load; the chart's zoom
+                     slider refines within it and the axis resolution follows. -->
+                <div class="join">
+                  <button v-for="r in ranges" :key="r.key" class="join-item btn btn-xs"
+                    :class="historyRange === r.key ? 'btn-active' : 'btn-ghost'"
+                    @click="setHistoryRange(r.key)">{{ r.label }}</button>
+                </div>
                 <div class="join">
                   <button class="join-item btn btn-xs" :class="historyChartMode === 'static' ? 'btn-active' : 'btn-ghost'"
                     @click="historyChartMode = 'static'; updateHistoryChart()">Static</button>
@@ -203,7 +221,26 @@
                 </button>
               </div>
             </div>
-            <div ref="historyChart" class="chart-container"></div>
+            <!-- Summary for the loaded window -->
+            <div class="grid grid-cols-2 sm:grid-cols-4 gap-2">
+              <div class="stat-cell">
+                <span class="stat-k">Requests</span>
+                <span class="stat-v">{{ historyStats.reqs.toLocaleString() }}</span>
+              </div>
+              <div class="stat-cell">
+                <span class="stat-k">Prompt tokens</span>
+                <span class="stat-v" :style="{ color: pal_blue }">{{ fmtStat(historyStats.prompt) }}</span>
+              </div>
+              <div class="stat-cell">
+                <span class="stat-k">Predicted tokens</span>
+                <span class="stat-v" :style="{ color: pal_green }">{{ fmtStat(historyStats.predicted) }}</span>
+              </div>
+              <div class="stat-cell">
+                <span class="stat-k">Avg generation</span>
+                <span class="stat-v">{{ historyStats.tokPerSec.toFixed(1) }}<small>tok/s</small></span>
+              </div>
+            </div>
+            <div ref="historyChart" class="history-chart"></div>
             <div class="overflow-x-auto max-h-60 overflow-y-auto">
               <table class="table table-xs table-pin-rows">
                 <thead>
@@ -312,6 +349,18 @@
         const historyChartMode = ref('static');
         const loadingModels = reactive({});
 
+        // Time windows for the history view. `sec` is how far back to load; null
+        // means the whole DB. The chart's zoom slider refines within the window.
+        const RANGES = [
+          { key: '1h', label: '1H', sec: 3600 },
+          { key: '6h', label: '6H', sec: 21600 },
+          { key: '24h', label: '24H', sec: 86400 },
+          { key: '7d', label: '7D', sec: 604800 },
+          { key: '30d', label: '30D', sec: 2592000 },
+          { key: 'all', label: 'All', sec: null },
+        ];
+        const historyRange = ref('24h');
+
         const gpuUtilChart = ref(null);
         const gpuVramChart = ref(null);
         const statusChart = ref(null);
@@ -326,6 +375,31 @@
 
         // Active seasonal palette; recomputed live so chart rebuilds pick up theme changes.
         const pal = () => T.colors();
+        // Bumped on every theme/variant change so palette-derived computeds re-run.
+        const paletteTick = ref(0);
+        const pal_blue = computed(() => (paletteTick.value, pal().blue));
+        const pal_green = computed(() => (paletteTick.value, pal().green));
+
+        /**
+         * Aggregates the loaded history window into headline numbers.
+         *
+         * Averages per-request generation speed (predicted tokens / duration)
+         * only over requests that actually produced tokens, so idle/empty rows
+         * don't skew it.
+         *
+         * @returns {{reqs:number, prompt:number, predicted:number, tokPerSec:number}}
+         */
+        const historyStats = computed(() => {
+          const h = history.value;
+          let prompt = 0, predicted = 0, speedSum = 0, speedN = 0;
+          for (const x of h) {
+            prompt += x.prompt_n;
+            predicted += x.predicted_n;
+            const dur = x.response_time - x.request_time;
+            if (dur > 0 && x.predicted_n > 0) { speedSum += x.predicted_n / dur; speedN++; }
+          }
+          return { reqs: h.length, prompt, predicted, tokPerSec: speedN ? speedSum / speedN : 0 };
+        });
         const statusColors = () => {
           const p = T.colors();
           return {
@@ -397,7 +471,7 @@
 
         function formatTime(ts) {
           const d = new Date(ts * 1000);
-          return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+          return d.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' });
         }
 
         // Compact axis numbers: 1234 -> 1.2k, 2500000 -> 2.5M
@@ -437,12 +511,25 @@
 
         async function fetchHistory() {
           try {
-            // cap the window so a huge history DB doesn't stall the page
-            const params = new URLSearchParams({ limit: '500' });
+            // Load only the selected window; cap rows so a huge DB can't stall.
+            const params = new URLSearchParams({ limit: '10000' });
             if (historyModel.value) params.set('model', historyModel.value);
+            const r = RANGES.find(x => x.key === historyRange.value);
+            if (r && r.sec) params.set('since', String(Math.floor(Date.now() / 1000) - r.sec));
             history.value = await (await fetch(`/router/history?${params}`)).json();
             updateHistoryChart();
           } catch {}
+        }
+
+        /**
+         * Switches the history time window and reloads that window.
+         *
+         * @param {string} key  - a RANGES key ('1h', '24h', 'all', ...)
+         * @returns {void}
+         */
+        function setHistoryRange(key) {
+          historyRange.value = key;
+          fetchHistory();
         }
 
         async function routerAction(action) {
@@ -671,10 +758,120 @@
           });
         }
 
+        /**
+         * Builds the shared time-axis config for the history chart.
+         *
+         * The axis label uses ECharts' hierarchical time formatter, so tick
+         * resolution follows the zoom: days show a date, hours/minutes show the
+         * clock, and a deep zoom exposes seconds — dates always present at day
+         * boundaries. min/max are pinned to the loaded window (so a sparse day
+         * still spans the full axis); 'All' lets the data define the extent.
+         *
+         * @param {object} p  - the active palette
+         * @returns {object} an ECharts xAxis config
+         */
+        function historyTimeAxis(p) {
+          const r = RANGES.find(x => x.key === historyRange.value);
+          const now = Date.now();
+          const min = (r && r.sec) ? now - r.sec * 1000 : undefined;
+          const max = (r && r.sec) ? now : undefined;
+          return {
+            type: 'time', min, max,
+            axisLine: { lineStyle: { color: p.surface1 } },
+            axisTick: { show: false },
+            axisLabel: {
+              color: p.overlay0, fontSize: 9, hideOverlap: true,
+              formatter: {
+                year: '{yyyy}', month: '{MMM}', day: '{MMM} {d}',
+                hour: '{HH}:{mm}', minute: '{HH}:{mm}', second: '{HH}:{mm}:{ss}',
+                millisecond: '{HH}:{mm}:{ss}', none: '{yyyy}-{MM}-{dd}',
+              },
+            },
+            splitLine: { show: false },
+          };
+        }
+
+        /**
+         * Builds the zoom controls (scroll/drag + a styled bottom slider).
+         *
+         * filterMode 'none' zooms the axis without dropping points, so the axis
+         * gains resolution as you narrow in rather than thinning the series.
+         *
+         * @param {object} p  - the active palette
+         * @returns {object[]} an ECharts dataZoom config array
+         */
+        function historyZoom(p) {
+          return [
+            { type: 'inside', filterMode: 'none' },
+            {
+              type: 'slider', filterMode: 'none', height: 18, bottom: 26,
+              borderColor: 'transparent', backgroundColor: p.surface0 + '66',
+              fillerColor: p.blue + '22',
+              handleStyle: { color: p.blue, borderColor: p.blue },
+              moveHandleStyle: { color: p.surface1 },
+              dataBackground: { lineStyle: { color: p.surface1, width: 1 }, areaStyle: { color: p.surface0 } },
+              selectedDataBackground: { lineStyle: { color: p.blue, opacity: 0.6 }, areaStyle: { color: p.blue, opacity: 0.12 } },
+              textStyle: { color: p.overlay0, fontSize: 9 },
+              labelFormatter: (v) => {
+                const d = new Date(v);
+                return d.toLocaleDateString([], { month: 'short', day: 'numeric' }) + '\n' +
+                       d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+              },
+            },
+          ];
+        }
+
+        /**
+         * Rich, date-aware tooltip shared by both history modes.
+         *
+         * @param {object} p  - the active palette
+         * @returns {function} an ECharts axis-tooltip formatter
+         */
+        function historyTooltipFormatter(p) {
+          return (params) => {
+            if (!params || !params.length) return '';
+            const head = new Date(params[0].value[0]).toLocaleString([], {
+              month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit',
+            });
+            let body = '';
+            for (const s of params) {
+              body += `<div style="display:flex;justify-content:space-between;gap:16px">` +
+                      `<span>${s.marker}${s.seriesName}</span><b>${fmtNum(s.value[1])}</b></div>`;
+            }
+            return `<div style="opacity:.6;margin-bottom:3px">${head}</div>${body}`;
+          };
+        }
+
         function updateHistoryChart() {
           if (!hstChart) return;
           const p = pal();
           const h = history.value;
+
+          const common = {
+            animation: false,
+            textStyle: { color: p.subtext0, fontFamily: 'ui-monospace, monospace', fontSize: 10 },
+            grid: { top: 30, right: 16, bottom: 62, left: 8, containLabel: true },
+            legend: {
+              data: ['Prompt', 'Predicted'], top: 2, right: 4,
+              textStyle: { color: p.overlay0, fontSize: 10 },
+              icon: 'roundRect', itemWidth: 10, itemHeight: 6,
+            },
+            tooltip: {
+              trigger: 'axis',
+              backgroundColor: p.surface0, borderColor: p.surface1, borderWidth: 1,
+              textStyle: { color: p.text, fontSize: 11 },
+              axisPointer: { type: 'line', lineStyle: { color: p.overlay0, opacity: 0.35, type: 'dashed' } },
+              formatter: historyTooltipFormatter(p),
+            },
+            xAxis: historyTimeAxis(p),
+            yAxis: {
+              type: 'value',
+              axisLabel: { color: p.overlay0, fontSize: 9, formatter: fmtNum },
+              splitLine: { lineStyle: { color: p.surface0, type: 'dashed' } },
+              axisLine: { show: false }, axisTick: { show: false },
+            },
+            dataZoom: historyZoom(p),
+          };
 
           if (historyChartMode.value === 'cumulative') {
             const sorted = [...h].sort((a, b) => a.request_time - b.request_time);
@@ -687,22 +884,8 @@
               promptData.push([t, cumPrompt]);
               predictedData.push([t, cumPredicted]);
             }
-
             hstChart.setOption({
-              ...baseOpts(),
-              tooltip: { ...baseOpts().tooltip, trigger: 'axis' },
-              legend: {
-                data: ['Prompt', 'Predicted'], bottom: 0,
-                textStyle: { color: p.overlay0, fontSize: 10 },
-                icon: 'roundRect', itemWidth: 10, itemHeight: 6,
-              },
-              grid: { top: 8, right: 12, bottom: 36, left: 8, containLabel: true },
-              yAxis: {
-                type: 'value',
-                axisLabel: { color: p.overlay0, fontSize: 9, formatter: fmtNum },
-                splitLine: { lineStyle: { color: p.surface0, type: 'dashed' } },
-                axisLine: { show: false }, axisTick: { show: false },
-              },
+              ...common,
               series: [
                 {
                   name: 'Prompt', type: 'line', stack: 'cumulative', showSymbol: false, smooth: 0.2,
@@ -720,31 +903,16 @@
             }, true);
           } else {
             hstChart.setOption({
-              ...baseOpts(),
-              tooltip: { ...baseOpts().tooltip, trigger: 'axis' },
-              legend: {
-                data: ['Prompt', 'Predicted'], bottom: 0,
-                textStyle: { color: p.overlay0, fontSize: 10 },
-                icon: 'roundRect', itemWidth: 10, itemHeight: 6,
-              },
-              grid: { top: 8, right: 12, bottom: 36, left: 8, containLabel: true },
-              yAxis: {
-                type: 'value',
-                axisLabel: { color: p.overlay0, fontSize: 9, formatter: fmtNum },
-                splitLine: { lineStyle: { color: p.surface0, type: 'dashed' } },
-                axisLine: { show: false }, axisTick: { show: false },
-              },
+              ...common,
               series: [
                 {
                   name: 'Prompt', type: 'bar', stack: 'tokens',
-                  itemStyle: { color: p.blue, borderRadius: [0, 0, 0, 0] },
-                  barMaxWidth: 20,
+                  itemStyle: { color: p.blue }, barMaxWidth: 20,
                   data: h.map(x => [x.request_time * 1000, x.prompt_n]),
                 },
                 {
                   name: 'Predicted', type: 'bar', stack: 'tokens',
-                  itemStyle: { color: p.green, borderRadius: [2, 2, 0, 0] },
-                  barMaxWidth: 20,
+                  itemStyle: { color: p.green, borderRadius: [2, 2, 0, 0] }, barMaxWidth: 20,
                   data: h.map(x => [x.request_time * 1000, x.predicted_n]),
                 },
               ],
@@ -765,8 +933,8 @@
           window.addEventListener('resize', () => {
             [utilChart, vramChart, stsChart, hstChart].forEach(c => c?.resize());
           });
-          // Recolour charts + model swatches when the palette/variant changes.
-          T.onChange(() => rebuildCharts());
+          // Recolor charts + model swatches + stat cells when the palette changes.
+          T.onChange(() => { paletteTick.value++; rebuildCharts(); });
         });
 
         onUnmounted(() => {
@@ -779,6 +947,8 @@
           routerStatus, routerPorts, routerLoading, models, history, historyModel,
           gpus, selectedGpu, selectedGpuName, selectGpu,
           historySort, historyChartMode, statusColor, statusDotClass, sortedHistory,
+          ranges: RANGES, historyRange, setHistoryRange, historyStats,
+          pal_blue, pal_green, fmtStat: fmtNum,
           formatTime, fetchHistory, routerAction, modelColor,
           loadModel, unloadModel, resetHistory, sortHistory, updateHistoryChart,
           gpuUtilChart, gpuVramChart, statusChart, historyChart,

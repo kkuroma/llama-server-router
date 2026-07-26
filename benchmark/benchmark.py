@@ -315,7 +315,7 @@ def saveJson(path: str, data: dict) -> None:
 
     Args:
         path (str)  : The destination file path
-        data (dict) : The structure to serialise
+        data (dict) : The structure to serialize
 
     Returns:
         None

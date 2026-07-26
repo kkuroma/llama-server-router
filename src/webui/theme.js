@@ -5,10 +5,10 @@
  * personal site: four themes (Haruhana/Natsumikan/Akiba/Fuyuyuki), each with a
  * light + dark variant, applied as CSS custom properties on <html>. The daisyUI
  * fallback variables in theme.css alias these, so every daisyUI component (cards,
- * buttons, selects, badges) recolours from one palette source.
+ * buttons, selects, badges) recolors from one palette source.
  *
  * `window.LRTheme` is framework-agnostic: it owns state + persistence and hands
- * the Vue apps the palette (for echarts + model colour-coding) and setters for
+ * the Vue apps the palette (for echarts + model color-coding) and setters for
  * the "Aa" appearance popover. State lives in localStorage under `llama-router-ui`.
  */
 
@@ -129,7 +129,7 @@ const LRTheme = {
   _listeners: [],
 
   /**
-   * Resolves the effective light/dark variant, honouring the OS preference
+   * Resolves the effective light/dark variant, honoring the OS preference
    * when the mode is 'system'.
    *
    * @returns {'light'|'dark'} the concrete variant to render
@@ -142,9 +142,9 @@ const LRTheme = {
   },
 
   /**
-   * Returns the active palette (named colours for charts + chrome vars).
+   * Returns the active palette (named colors for charts + chrome vars).
    *
-   * @returns {Object<string,string>} colour name -> hex for the current theme/variant
+   * @returns {Object<string,string>} color name -> hex for the current theme/variant
    */
   colors() {
     return THEMES[this.state.theme][this.variant()];
@@ -179,7 +179,7 @@ const LRTheme = {
   setTheme(name) { if (THEMES[name]) { this.state.theme = name; this.apply(); this._emit(); } },
 
   /**
-   * Switches the colour variant mode, applies it, persists, and notifies.
+   * Switches the color variant mode, applies it, persists, and notifies.
    *
    * 'system' resolves live against the OS preference via variant().
    *
@@ -201,7 +201,7 @@ const LRTheme = {
   /**
    * Registers a callback fired after any theme/variant/size change.
    *
-   * Used by the dashboard to recolour its echarts instances on theme changes.
+   * Used by the dashboard to recolor its echarts instances on theme changes.
    *
    * @param {function} cb  - invoked with no args after each change
    * @returns {void}

@@ -3,7 +3,7 @@
  * site: Google Sans Flex / Maple Mono, the seasonal palette as CSS variables,
  * a floating pill navbar, rounded cards, and the "Aa" appearance popover.
  *
- * daisyUI still renders the components; its fallback colour variables are
+ * daisyUI still renders the components; its fallback color variables are
  * aliased onto the seasonal palette below so one theme source drives everything.
  * theme.js overrides the --base/--primary/... vars on <html> per theme+variant.
  */
@@ -47,10 +47,10 @@
   --font-size-base: 16px;
 }
 
-/* Alias daisyUI's fallback colours onto the seasonal palette. daisyUI utilities
+/* Alias daisyUI's fallback colors onto the seasonal palette. daisyUI utilities
    read var(--fallback-*) when the oklch theme vars are unset, so aliasing here
-   recolours every component from the palette above. --crust reads well as the
-   on-accent text colour in both light and dark variants. */
+   recolors every component from the palette above. --crust reads well as the
+   on-accent text color in both light and dark variants. */
 [data-theme="seasons"] {
   --fallback-b1: var(--base);      --fallback-b2: var(--mantle);   --fallback-b3: var(--crust);
   --fallback-bc: var(--text);
