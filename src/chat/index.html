@@ -129,10 +129,10 @@
             <div class="text-sm opacity-70">Load a model first to see the chat UI.</div>
             <div class="text-xs opacity-40">Pick one above, or from the Dashboard.</div>
           </div>
-          <!-- One iframe per live instance, pointed straight at that replica's
-               own host:port. Only the active one is shown so switching tabs
-               doesn't reload the others. The embedded UI talks to its own
-               instance directly — its traffic never re-enters the router. -->
+          <!-- One iframe per live instance, loaded via the same-origin
+               /instance/{port}/ proxy. Only the active one is shown so switching
+               tabs doesn't reload the others. That proxy forwards straight to the
+               replica, off the scheduler/RWLock, so UI traffic never blocks unload. -->
           <template v-else>
             <iframe v-for="t in instances" :key="t.port + '.' + (nonces[t.port] || 0)"
               v-show="t.port === activeTab"
@@ -223,19 +223,20 @@
         const activeTab = ref(null);
 
         /**
-         * Builds the direct URL of a replica's own web UI.
+         * Builds the same-origin proxy URL of a replica's own web UI.
          *
-         * Points straight at the instance's host:port (this page's hostname, the
-         * replica's port) so the embedded UI's traffic goes to that llama-server
-         * directly and never re-enters the router. The reload nonce is appended
-         * as a query param to force a fresh load on demand.
+         * Points at /instance/{port}/ on this same origin (not the raw instance
+         * port), so it works over Tailscale and behind a reverse proxy where only
+         * the router port is reachable. The router's pass-through proxy forwards
+         * it straight to that replica, off the scheduler/RWLock. The reload nonce
+         * is appended as a query param to force a fresh load on demand.
          *
          * @param {number} port  - the replica's port
-         * @returns {string} the absolute URL to embed for that instance
+         * @returns {string} the root-relative URL to embed for that instance
          */
         function frameSrc(port) {
           const n = nonces[port] || 0;
-          return `${location.protocol}//${location.hostname}:${port}/${n ? '?_r=' + n : ''}`;
+          return `/instance/${port}/${n ? '?_r=' + n : ''}`;
         }
 
         /**

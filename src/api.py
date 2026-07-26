@@ -1,6 +1,8 @@
+import re
 import time
 from pathlib import Path
 
+import httpx
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse, Response, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -168,14 +170,13 @@ async def chatPage():
     """
     Serves the chat single-page app
 
-    The shell (navbar + Aa popover + tabbed iframes) is ours; each tab embeds a
-    live llama-server replica's own web UI DIRECTLY (iframe src points at the
-    instance's own host:port), so the embedded UI's polling/generation traffic
-    never re-enters the router. Routing that traffic through the catch-all made
-    it count as RWLock readers, which starve the write-lock unloadModel needs —
-    leaving the router stuck "serving" and unable to unload. Direct-embedding
-    keeps all UI traffic on the instance; only the load/unload chips (explicit
-    POST routes) touch the router.
+    The shell (navbar + Aa popover + one tab per instance) is ours; each tab
+    embeds a live llama-server replica's own web UI via /instance/{port}/ — a
+    same-origin pass-through proxy that forwards straight to that replica and
+    bypasses the scheduler/RWLock. Same-origin (not the raw instance port) is
+    what makes it work over Tailscale and behind a reverse proxy; bypassing the
+    lock is what keeps the embedded UI's polling from starving the write-lock
+    unloadModel needs (which would leave the router stuck "serving").
 
     Raises:
         HTTPException: 404 if the chat HTML is missing
@@ -184,6 +185,120 @@ async def chatPage():
     if not html_path.exists():
         raise HTTPException(status_code=404, detail="Chat app not found")
     return HTMLResponse(html_path.read_text())
+
+# Injected into the proxied llama.cpp index so its ABSOLUTE API paths (/v1/*,
+# /props, ...) get rewritten to /instance/{port}/* and stay pinned to this
+# replica (its relative ./_app/* assets already resolve under the prefix). The
+# __PORT__ token is substituted per request. Without this the UI's API calls
+# would escape the prefix back to the router root — re-entering the scheduler
+# and the very RWLock starvation this design avoids.
+_INSTANCE_SHIM = """<script>
+(function () {
+  var P = '/instance/__PORT__';
+  function rw(u) {
+    if (typeof u !== 'string') return u;
+    var s = u;
+    if (s.indexOf(location.origin) === 0) s = s.slice(location.origin.length);
+    if (s.charAt(0) !== '/') return u;              // relative or cross-origin — leave
+    if (s === P || s.indexOf(P + '/') === 0) return u;  // already prefixed
+    return P + s;
+  }
+  if (window.fetch) {
+    var of = window.fetch;
+    window.fetch = function (input, init) {
+      try {
+        if (typeof input === 'string') input = rw(input);
+        else if (input && input.url) { var n = rw(input.url); if (n !== input.url) input = new Request(n, input); }
+      } catch (e) {}
+      return of.call(this, input, init);
+    };
+  }
+  if (window.EventSource) {
+    var OE = window.EventSource;
+    window.EventSource = function (u, c) { return new OE(rw(u), c); };
+    window.EventSource.prototype = OE.prototype;
+  }
+  if (window.XMLHttpRequest) {
+    var oo = XMLHttpRequest.prototype.open;
+    XMLHttpRequest.prototype.open = function (m, u) {
+      try { u = rw(u); } catch (e) {}
+      return oo.call(this, m, u, arguments[3], arguments[4], arguments[5]);
+    };
+  }
+})();
+</script>"""
+
+@app.api_route("/instance/{port}/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
+async def instanceProxy(port: int, path: str, request: Request):
+    """
+    Same-origin pass-through proxy to a single llama-server replica
+
+    Forwards the request straight to http://127.0.0.1:{port}/{path} WITHOUT
+    touching router.addRequest / the RWLock, so the embedded chat UI's polling
+    and streaming never take reader slots that would starve unload. Keeping it on
+    the router's own port (rather than the raw instance port) is what lets it work
+    over Tailscale and behind a reverse proxy. The instance's index HTML is
+    buffered so the API-path shim can be injected; everything else streams through
+    (SSE included, so tok/s tick live).
+
+    Args:
+        port (int)          : The replica port; must be a live instance
+        path (str)          : The remaining path to forward to that replica
+        request (Request)   : The incoming request to forward
+
+    Raises:
+        HTTPException: 404 if no live instance owns that port, 502 if it is unreachable
+    """
+    r = getRouter()
+    if port not in r.processes:
+        raise HTTPException(status_code=404, detail=f"No live instance on port {port}")
+
+    url = f"http://127.0.0.1:{port}/{path}"
+    if request.url.query:
+        url += f"?{request.url.query}"
+    fwd_headers = {k: v for k, v in request.headers.items() if k.lower() not in ("host", "content-length")}
+    body = await request.body()
+
+    client = httpx.AsyncClient(timeout=None)
+    try:
+        upstream = client.build_request(request.method, url, content=body, headers=fwd_headers)
+        resp = await client.send(upstream, stream=True)
+    except Exception as exc:
+        await client.aclose()
+        raise HTTPException(status_code=502, detail=f"Instance {port} unreachable: {exc}")
+
+    content_type = resp.headers.get("content-type", "")
+
+    # HTML index: buffer, decompress (httpx decodes .aread()), inject the shim.
+    if "text/html" in content_type:
+        raw = await resp.aread()
+        status = resp.status_code
+        await resp.aclose()
+        await client.aclose()
+        text = raw.decode("utf-8", "replace")
+        shim = _INSTANCE_SHIM.replace("__PORT__", str(port))
+        # Inject right after the opening <head> so it runs before the app bundle.
+        new_text, n = re.subn(r"(<head[^>]*>)", r"\1" + shim, text, count=1, flags=re.IGNORECASE)
+        text = new_text if n else shim + text
+        return HTMLResponse(text, status_code=status)
+
+    # Everything else streams through raw (content-encoding preserved).
+    safe_headers = {k: v for k, v in resp.headers.items() if k.lower() not in ("content-length", "transfer-encoding", "connection", "keep-alive")}
+
+    async def streamUpstream():
+        try:
+            async for chunk in resp.aiter_raw():
+                yield chunk
+        finally:
+            await resp.aclose()
+            await client.aclose()
+
+    return StreamingResponse(
+        streamUpstream(),
+        status_code=resp.status_code,
+        media_type=content_type or None,
+        headers=safe_headers,
+    )
 
 @app.get("/router/models")
 async def routerModels():
