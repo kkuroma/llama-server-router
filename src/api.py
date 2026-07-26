@@ -1,6 +1,7 @@
 import time
 from pathlib import Path
 
+import httpx
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse, Response, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -160,6 +161,51 @@ async def dashboard():
     if not html_path.exists():
         raise HTTPException(status_code=404, detail="Dashboard not found")
     return HTMLResponse(html_path.read_text())
+
+# Chat (themed shell + embedded llama.cpp UI)
+
+@app.get("/chat")
+async def chatPage():
+    """
+    Serves the chat single-page app
+
+    The shell (navbar + Aa popover + tabbed iframes) is ours; each tab embeds
+    llama.cpp's own web UI via /chatui for quick tok/s testing.
+
+    Raises:
+        HTTPException: 404 if the chat HTML is missing
+    """
+    html_path = Path(__file__).parent / "chat" / "index.html"
+    if not html_path.exists():
+        raise HTTPException(status_code=404, detail="Chat app not found")
+    return HTMLResponse(html_path.read_text())
+
+@app.get("/chatui")
+async def chatUi():
+    """
+    Serves llama.cpp's built-in web UI, proxied live from a running instance
+
+    The router hosts no chat UI of its own; it fetches the index HTML from a live
+    llama-server replica so the /chat page can embed it in an iframe. Served at a
+    top-level path so the UI's relative asset requests (./_app/*) resolve to
+    /_app/* and its absolute API calls (/v1/*, /models/load) fall through to the
+    router's catch-all proxy — keeping every request router-governed. Requires at
+    least one loaded instance (the /chat shell shows a "load a model" state until
+    then, so this 503 is only a fallback).
+
+    Raises:
+        HTTPException: 503 if no replica is running, 502 if the fetch fails
+    """
+    r = getRouter()
+    ports = r._sortedPorts()
+    if not ports:
+        raise HTTPException(status_code=503, detail="No model loaded")
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(f"http://0.0.0.0:{ports[0]}/", timeout=10.0)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Failed to reach llama.cpp UI: {exc}")
+    return HTMLResponse(resp.text, status_code=resp.status_code)
 
 @app.get("/router/models")
 async def routerModels():
