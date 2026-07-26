@@ -1,13 +1,22 @@
 import time
+from typing import Any, TypedDict, cast
 
 try:
     import pynvml
-    _PYNVML_AVAILABLE = True
 except ImportError:
-    _PYNVML_AVAILABLE = False
+    pynvml = None
 
 WINDOW_SECONDS = 7200  # 2 hours
 FLUSH_INTERVAL = 10.0  # flush every 10s for higher resolution
+
+
+class GpuSnapshot(TypedDict):
+    """One GPU's JSON-serializable history, as returned to the dashboard."""
+    index: int
+    name: str
+    total_vram_mb: float
+    util_history: list[tuple[float, float]]
+    vram_history: list[tuple[float, float]]
 
 
 class GPUMonitor:
@@ -21,7 +30,7 @@ class GPUMonitor:
     """
 
     def __init__(self):
-        if not _PYNVML_AVAILABLE:
+        if pynvml is None:
             raise RuntimeError("pynvml is not installed")
         pynvml.nvmlInit()
         count = pynvml.nvmlDeviceGetCount()
@@ -29,7 +38,7 @@ class GPUMonitor:
             raise RuntimeError("no NVIDIA GPUs detected")
         # One state dict per GPU. util_history/vram_history are the flushed rolling
         # windows; the _samples lists buffer the current interval's per-second reads.
-        self.gpus: list[dict] = []
+        self.gpus: list[dict[str, Any]] = []
         for i in range(count):
             handle = pynvml.nvmlDeviceGetHandleByIndex(i)
             # Name is cosmetic — never let a driver/pynvml quirk here abort the
@@ -44,7 +53,7 @@ class GPUMonitor:
                 "index": i,
                 "handle": handle,
                 "name": name,
-                "total_vram_mb": pynvml.nvmlDeviceGetMemoryInfo(handle).total / (1024 ** 2),
+                "total_vram_mb": int(pynvml.nvmlDeviceGetMemoryInfo(handle).total) / (1024 ** 2),
                 "util_history": [],   # (unix_ts, percent)
                 "vram_history": [],   # (unix_ts, used_mb)
                 "_util_samples": [],
@@ -64,11 +73,12 @@ class GPUMonitor:
         Called every 1s from a background thread; on flush each GPU appends its
         window maxima and drops history older than WINDOW_SECONDS
         """
+        assert pynvml is not None  # GPUMonitor is only constructed when pynvml imported
         for g in self.gpus:
             util = pynvml.nvmlDeviceGetUtilizationRates(g["handle"])
             mem = pynvml.nvmlDeviceGetMemoryInfo(g["handle"])
             g["_util_samples"].append(util.gpu)
-            g["_vram_samples"].append(mem.used / (1024 ** 2))
+            g["_vram_samples"].append(int(mem.used) / (1024 ** 2))
 
         now = time.time()
         if now - self._last_flush_time >= FLUSH_INTERVAL:
@@ -83,22 +93,23 @@ class GPUMonitor:
                 g["vram_history"] = [(t, v) for t, v in g["vram_history"] if t > cutoff]
             self._last_flush_time = now
 
-    def snapshot(self) -> list[dict]:
+    def snapshot(self) -> list[GpuSnapshot]:
         """
         Returns the JSON-serializable per-GPU histories for the API
 
         Returns:
-            list[dict]: one entry per GPU with index, name, total_vram_mb, and the
-                util_history / vram_history rolling windows (NVML handles omitted)
+            list[GpuSnapshot]: one entry per GPU with index, name, total_vram_mb, and
+                the util_history / vram_history rolling windows (NVML handles omitted)
         """
+        # self.gpus holds dynamic NVML-derived values, so widen before the cast.
         return [
-            {
+            cast(GpuSnapshot, cast(object, {
                 "index": g["index"],
                 "name": g["name"],
                 "total_vram_mb": g["total_vram_mb"],
                 "util_history": g["util_history"],
                 "vram_history": g["vram_history"],
-            }
+            }))
             for g in self.gpus
         ]
 

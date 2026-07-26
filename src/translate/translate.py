@@ -12,7 +12,7 @@ class TranslationService:
     """
 
     def __init__(self):
-        self.languages: list[dict] = []
+        self.languages: list[dict[str, str]] = []
         self.lang_map: dict[str, str] = {}
         self.prompt_template: str = ""
         self._load()
@@ -37,7 +37,7 @@ class TranslationService:
                 self.lang_map[lang_id] = lang_name
         self.prompt_template = PROMPT_TEMPLATE.read_text()
 
-    def getLanguages(self, lang: str | None = None) -> list[dict]:
+    def getLanguages(self, lang: str | None = None) -> list[dict[str, str]]:
         """
         Returns the language table, optionally filtered by display name
 
@@ -57,7 +57,7 @@ class TranslationService:
         target_id: str,
         text: str,
         additionals: str = "",
-    ) -> list[dict]:
+    ) -> list[dict[str, str]]:
         """
         Builds a 3-chunk message array optimized for cache_prompt reuse
 

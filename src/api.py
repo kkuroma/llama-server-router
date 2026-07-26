@@ -1,12 +1,17 @@
+import asyncio
+import json
 import re
 import time
 from pathlib import Path
+from typing import TypedDict, cast
 
 import httpx
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse, Response, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
-from router import LLMRouter
+from router import LLMRouter, Envelope, HistoryRow
+from monitor import GPUMonitor, StatusTimeline, GpuSnapshot
+from translate.translate import TranslationService
 
 app = FastAPI()
 
@@ -14,9 +19,30 @@ app = FastAPI()
 # Mounted before the catch-all proxy so /webui/* is served locally, not forwarded.
 app.mount("/webui", StaticFiles(directory=Path(__file__).parent / "webui"), name="webui")
 router: LLMRouter | None = None
-gpu_monitor = None  # set by main.py
-status_timeline = None  # set by main.py
-translation_service = None  # set by main.py
+gpu_monitor: GPUMonitor | None = None  # set by main.py
+status_timeline: StatusTimeline | None = None  # set by main.py
+translation_service: TranslationService | None = None  # set by main.py
+
+
+class ModelActionRequest(TypedDict, total=False):
+    """Body of the /models/load and /models/unload endpoints."""
+    model: str
+
+
+class TranslateRequest(TypedDict, total=False):
+    """Body of the /router/translate endpoint."""
+    model_id: str
+    source_id: str
+    target_id: str
+    text: str
+    additionals: str
+    stream: bool
+
+
+class ProxyBody(TypedDict, total=False):
+    """The subset of a proxied JSON body the catch-all inspects."""
+    model: str
+    stream: bool
 
 
 def getRouter() -> LLMRouter:
@@ -83,7 +109,7 @@ async def routerRestart():
 
 # overwrites /model/load /model/unload
 @app.post("/models/unload")
-async def routerUnload(body: dict):
+async def routerUnload(body: ModelActionRequest):
     """
     Unloads a model by killing all of its replica processes
 
@@ -103,7 +129,7 @@ async def routerUnload(body: dict):
     return {"success": True}
 
 @app.post("/models/load")
-async def routerLoad(body: dict):
+async def routerLoad(body: ModelActionRequest):
     """
     Loads a model, spawning its replica processes and evicting as needed
 
@@ -131,7 +157,7 @@ async def routerHistory(
     limit: int = 10000,
     since: float | None = None,
     until: float | None = None,
-):
+) -> list[HistoryRow]:
     """
     Returns request history rows within a time window, optionally filtered by model
 
@@ -274,7 +300,7 @@ async def instanceProxy(port: int, path: str, request: Request):
         await client.aclose()
         raise HTTPException(status_code=502, detail=f"Instance {port} unreachable: {exc}")
 
-    content_type = resp.headers.get("content-type", "")
+    content_type = cast(str, resp.headers.get("content-type", ""))
 
     # HTML index: buffer, decompress (httpx decodes .aread()), inject the shim.
     if "text/html" in content_type:
@@ -326,7 +352,7 @@ async def routerModels():
                 "id": mid,
                 "status": {"value": "loaded" if mid in loaded else "unloaded"},
                 "gpus": r.model_gpus.get(mid, [0]),
-                "ports": r._modelPorts(mid),
+                "ports": r.modelPorts(mid),
             }
             for mid in r.router_config["LLM"]
         ],
@@ -361,14 +387,16 @@ async def v1Models():
 async def routerGpu():
     """Returns per-GPU utilization and VRAM history for every detected GPU."""
     if gpu_monitor is None:
-        return {"error": "GPU monitor not available", "gpus": []}
+        empty: list[GpuSnapshot] = []
+        return {"error": "GPU monitor not available", "gpus": empty}
     return {"gpus": gpu_monitor.snapshot()}
 
 @app.get("/router/status_timeline")
 async def routerStatusTimeline():
     """Returns the router status change timeline."""
     if status_timeline is None:
-        return {"entries": []}
+        empty: list[tuple[float, str]] = []
+        return {"entries": empty}
     return {"entries": status_timeline.entries}
 
 # Translation
@@ -415,12 +443,11 @@ async def routerTranslate(request: Request):
     Raises:
         HTTPException: 503 if translation is unavailable, 422 on bad fields, 404 on unknown model
     """
-    import json as _json
     r = getRouter()
     if translation_service is None:
         raise HTTPException(status_code=503, detail="Translation service not available")
 
-    body = await request.json()
+    body = cast(TranslateRequest, await request.json())
     model_id = body.get("model_id")
     source_id = body.get("source_id")
     target_id = body.get("target_id")
@@ -428,7 +455,7 @@ async def routerTranslate(request: Request):
     additionals = body.get("additionals", "")
     is_streaming = body.get("stream", False)
 
-    if not all([model_id, source_id, target_id, text]):
+    if model_id is None or source_id is None or target_id is None or text is None:
         raise HTTPException(status_code=422, detail="Missing required fields: model_id, source_id, target_id, text")
     if model_id not in r.router_config["LLM"]:
         raise HTTPException(status_code=404, detail=f"Model {model_id} not found")
@@ -439,14 +466,16 @@ async def routerTranslate(request: Request):
 
     messages = translation_service.buildMessages(source_id, target_id, text, additionals)
 
-    envelope = {
+    envelope: Envelope = {
         "path": "/v1/chat/completions",
         "method": "POST",
-        "body": _json.dumps({
+        "body": json.dumps({
             "model": model_id,
             "messages": messages,
             "cache_prompt": True,
             "stream": is_streaming,
+            "chat_template_kwargs": {"enable_thinking": False}, # disable thinking for translation for speed
+            "reasoning_format": "none",
         }),
         "headers": {"Content-Type": "application/json"},
         "model": model_id,
@@ -457,9 +486,10 @@ async def routerTranslate(request: Request):
     result = await future
 
     if is_streaming:
+        queue = cast("asyncio.Queue[bytes | Exception | None]", result)
         async def streamChunks():
             while True:
-                chunk = await result.get()
+                chunk = await queue.get()
                 if chunk is None:
                     break
                 if isinstance(chunk, Exception):
@@ -467,7 +497,8 @@ async def routerTranslate(request: Request):
                 yield chunk
         return StreamingResponse(streamChunks(), media_type="text/event-stream")
     else:
-        return JSONResponse(content=result.json(), status_code=result.status_code)
+        response = cast(httpx.Response, result)
+        return JSONResponse(content=response.json(), status_code=response.status_code)
 
 # proxies everything else to the backend
 
@@ -503,7 +534,7 @@ async def proxy(full_path: str, request: Request):
     path_with_query = f"/{full_path}"
     if query_string:
         path_with_query += f"?{query_string}"
-    envelope = {
+    envelope: Envelope = {
         "path": path_with_query,
         "method": request.method,
         "body": raw_body,
@@ -513,8 +544,7 @@ async def proxy(full_path: str, request: Request):
 
     # detect streaming: try to parse JSON and check "stream" field
     try:
-        import json
-        parsed = json.loads(raw_body)
+        parsed = cast(ProxyBody, json.loads(raw_body))
         envelope["is_streaming"] = parsed.get("stream", False)
         # include parsed model in envelope so the router can check it
         if "model" in parsed:
@@ -537,7 +567,7 @@ async def proxy(full_path: str, request: Request):
             }
         )
 
-    is_streaming = envelope["is_streaming"]
+    is_streaming = envelope.get("is_streaming", False)
 
     # enqueue and await result
     future = await r.addRequest(envelope)
@@ -555,9 +585,10 @@ async def proxy(full_path: str, request: Request):
         )
 
     if is_streaming:
+        queue = cast("asyncio.Queue[bytes | Exception | None]", result)
         async def streamChunks():
             while True:
-                chunk = await result.get()
+                chunk = await queue.get()
                 if chunk is None:
                     break
                 if isinstance(chunk, Exception):
@@ -565,24 +596,25 @@ async def proxy(full_path: str, request: Request):
                 yield chunk
         return StreamingResponse(streamChunks(), media_type="text/event-stream")
     else:
-        content_type = result.headers.get("Content-Type", "")
+        response = cast(httpx.Response, result)
+        content_type = cast(str, response.headers.get("Content-Type", ""))
         safe_headers = {
-            k: v for k, v in result.headers.items()
+            k: v for k, v in response.headers.items()
             if k.lower() not in ("content-length", "transfer-encoding", "content-encoding")
         }
         if "application/json" in content_type:
             try:
                 return JSONResponse(
-                    content=result.json(),
-                    status_code=result.status_code,
+                    content=response.json(),
+                    status_code=response.status_code,
                     headers=safe_headers,
                 )
             except Exception:
                 pass
 
         return Response(
-            content=result.content,
-            status_code=result.status_code,
+            content=response.content,
+            status_code=response.status_code,
             media_type=content_type,
             headers=safe_headers,
         )
