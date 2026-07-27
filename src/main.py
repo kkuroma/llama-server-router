@@ -84,7 +84,7 @@ async def main():
         while True:
             if gpu_monitor:
                 await asyncio.to_thread(gpu_monitor.poll)
-            status_timeline.record(router.status.value)
+            status_timeline.record(router.gpuStatuses())
             await asyncio.sleep(1.0)
 
     asyncio.create_task(_monitorLoop())

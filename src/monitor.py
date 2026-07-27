@@ -116,26 +116,29 @@ class GPUMonitor:
 
 class StatusTimeline:
     """
-    Records router status changes over a rolling window
+    Records per-GPU router status changes over a rolling window
 
-    Only appends when the status actually changes, dropping entries older than
-    WINDOW_SECONDS on each change
+    Keeps one independent timeline per GPU index. For each GPU it only appends
+    when that GPU's status actually changes, dropping entries older than
+    WINDOW_SECONDS on each change.
     """
 
     def __init__(self):
-        self.entries: list[tuple[float, str]] = []  # (unix_ts, status_value)
-        self._last_status: str | None = None
+        self.entries: dict[int, list[tuple[float, str]]] = {}  # gpu -> [(unix_ts, status_value), ...]
+        self._last_status: dict[int, str] = {}
 
-    def record(self, status_value: str):
+    def record(self, statuses: dict[int, str]):
         """
-        Appends a status entry when the value differs from the previous one
+        Appends an entry per GPU whose status differs from its previous value
 
         Args:
-            status_value (str): The current router status value to record
+            statuses (dict[int, str]): The current {gpu_index: status_value} map
         """
-        if status_value != self._last_status:
-            now = time.time()
-            self.entries.append((now, status_value))
-            self._last_status = status_value
-            cutoff = now - WINDOW_SECONDS
-            self.entries = [(t, s) for t, s in self.entries if t > cutoff]
+        now = time.time()
+        cutoff = now - WINDOW_SECONDS
+        for gpu, status_value in statuses.items():
+            if status_value != self._last_status.get(gpu):
+                lane = self.entries.setdefault(gpu, [])
+                lane.append((now, status_value))
+                self._last_status[gpu] = status_value
+                self.entries[gpu] = [(t, s) for t, s in lane if t > cutoff]

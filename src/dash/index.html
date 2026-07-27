@@ -403,7 +403,7 @@
         const statusColors = () => {
           const p = T.colors();
           return {
-            idle: p.blue, serving: p.green, starting: p.yellow,
+            idle: p.blue, serving: p.green, swapping: p.mauve, starting: p.yellow,
             stopping: p.peach, inactive: p.surface2, error: p.red,
           };
         };
@@ -437,16 +437,18 @@
 
         const statusColor = computed(() => {
           const map = {
-            idle: 'badge-info', serving: 'badge-success', starting: 'badge-warning',
-            stopping: 'badge-warning', inactive: 'badge-ghost', error: 'badge-error',
+            idle: 'badge-info', serving: 'badge-success', swapping: 'badge-secondary',
+            starting: 'badge-warning', stopping: 'badge-warning', inactive: 'badge-ghost',
+            error: 'badge-error',
           };
           return map[routerStatus.value] || 'badge-ghost';
         });
 
         const statusDotClass = computed(() => {
           const map = {
-            idle: 'bg-info', serving: 'bg-success animate-pulse', starting: 'bg-warning animate-pulse',
-            stopping: 'bg-warning', inactive: 'bg-base-content/20', error: 'bg-error animate-pulse',
+            idle: 'bg-info', serving: 'bg-success animate-pulse', swapping: 'bg-secondary animate-pulse',
+            starting: 'bg-warning animate-pulse', stopping: 'bg-warning', inactive: 'bg-base-content/20',
+            error: 'bg-error animate-pulse',
           };
           return map[routerStatus.value] || 'bg-base-content/20';
         });
@@ -617,7 +619,7 @@
           stsChart  = echarts.init(statusChart.value,  null, { renderer: 'canvas' });
           hstChart  = echarts.init(historyChart.value,  null, { renderer: 'canvas' });
           updateGpuCharts();
-          updateStatusChart({ entries: [] });
+          updateStatusChart({ entries: {} });
           updateHistoryChart();
         }
 
@@ -700,27 +702,46 @@
           });
         }
 
+        /**
+         * Renders the per-GPU status timeline: one horizontal lane per GPU.
+         *
+         * The server sends { entries: { "<gpu>": [[ts, status], ...] } }; each
+         * GPU becomes a category lane, and consecutive entries in a lane are
+         * drawn as colored segments spanning to the next entry (or now).
+         *
+         * @param {object} data  - the /router/status_timeline payload
+         * @returns {void}
+         */
         function updateStatusChart(data) {
           if (!stsChart) return;
           const p = pal();
           const sc = statusColors();
-          const entries = data.entries || [];
+          const byGpu = data.entries || {};
+          // Numeric GPU indices, ascending; fall back to the live GPU list so an
+          // empty timeline still shows a labeled lane per known GPU.
+          let gpuIdx = Object.keys(byGpu).map(Number).sort((a, b) => a - b);
+          if (!gpuIdx.length) gpuIdx = gpus.value.map(g => g.index).sort((a, b) => a - b);
+          if (!gpuIdx.length) gpuIdx = [0];
           const now = Date.now();
           const segments = [];
-          for (let i = 0; i < entries.length; i++) {
-            const [ts, status] = entries[i];
-            const start = ts * 1000;
-            const end = i + 1 < entries.length ? entries[i + 1][0] * 1000 : now;
-            segments.push({
-              value: [start, 0, end, status],
-              itemStyle: { color: sc[status] || p.surface1 },
-            });
-          }
+          gpuIdx.forEach((g, lane) => {
+            const entries = byGpu[g] || byGpu[String(g)] || [];
+            for (let i = 0; i < entries.length; i++) {
+              const [ts, status] = entries[i];
+              const start = ts * 1000;
+              const end = i + 1 < entries.length ? entries[i + 1][0] * 1000 : now;
+              segments.push({
+                value: [start, lane, end, status, g],
+                itemStyle: { color: sc[status] || p.surface1 },
+              });
+            }
+          });
+          const laneNames = gpuIdx.map(g => `GPU ${g}`);
 
           stsChart.setOption({
             animation: false,
             textStyle: { color: p.subtext0, fontFamily: 'ui-monospace, monospace', fontSize: 10 },
-            grid: { top: 8, right: 12, bottom: 28, left: 48 },
+            grid: { top: 8, right: 12, bottom: 28, left: 52 },
             xAxis: {
               type: 'time',
               axisLine: { lineStyle: { color: p.surface1 } },
@@ -728,7 +749,14 @@
               axisLabel: { color: p.overlay0, fontSize: 9, formatter: '{HH}:{mm}' },
               splitLine: { show: false },
             },
-            yAxis: { show: false, min: -1, max: 1 },
+            yAxis: {
+              type: 'category',
+              data: laneNames,
+              axisLine: { show: false },
+              axisTick: { show: false },
+              axisLabel: { color: p.overlay0, fontSize: 9 },
+              splitLine: { show: false },
+            },
             tooltip: {
               backgroundColor: p.surface0, borderColor: p.surface1, borderWidth: 1,
               textStyle: { color: p.text, fontSize: 11 },
@@ -736,15 +764,16 @@
                 const d = params.data.value;
                 const s = new Date(d[0]).toLocaleTimeString();
                 const e = new Date(d[2]).toLocaleTimeString();
-                return `<span style="color:${sc[d[3]] || p.text}">${d[3]}</span><br/>${s} — ${e}`;
+                return `GPU ${d[4]}: <span style="color:${sc[d[3]] || p.text}">${d[3]}</span><br/>${s} — ${e}`;
               },
             },
             series: [{
               type: 'custom',
               renderItem: (params, api) => {
-                const start = api.coord([api.value(0), 0]);
-                const end = api.coord([api.value(2), 0]);
-                const h = api.size([0, 1])[1] * 0.5;
+                const lane = api.value(1);
+                const start = api.coord([api.value(0), lane]);
+                const end = api.coord([api.value(2), lane]);
+                const h = Math.min(api.size([0, 1])[1] * 0.5, 14);
                 const r = Math.min(4, (end[0] - start[0]) / 2);
                 return {
                   type: 'rect',

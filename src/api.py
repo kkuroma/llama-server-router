@@ -73,7 +73,8 @@ async def routerStatus():
     """
     r = getRouter()
     return {
-        "status": r.status.value,
+        "status": r.overallStatus().value,
+        "gpu_status": {str(g): s for g, s in r.gpuStatuses().items()},
         "ports": sorted(r.processes.keys()),
         "instances": {str(p): m for p, m in sorted(r.port_model.items())},
         "num_gpus": r.num_gpus,
@@ -393,11 +394,11 @@ async def routerGpu():
 
 @app.get("/router/status_timeline")
 async def routerStatusTimeline():
-    """Returns the router status change timeline."""
+    """Returns the per-GPU router status change timeline ({gpu: [[ts, status], ...]})."""
     if status_timeline is None:
-        empty: list[tuple[float, str]] = []
+        empty: dict[str, list[tuple[float, str]]] = {}
         return {"entries": empty}
-    return {"entries": status_timeline.entries}
+    return {"entries": {str(g): lane for g, lane in status_timeline.entries.items()}}
 
 # Translation
 

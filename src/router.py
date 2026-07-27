@@ -13,12 +13,17 @@ import aiosqlite
 
 HISTORY_DB_PATH = os.environ.get("HISTORY_DB_PATH", "/webui/monitor/history.db")
 
-# All available statuses
+# All available statuses. INACTIVE/STARTING/STOPPING/ERROR are router-wide
+# lifecycle states; IDLE/SERVING/SWAPPING are the running states and are tracked
+# PER GPU (a GPU is SERVING while a generation on it is in flight, SWAPPING while
+# a model is loading/unloading on it, else IDLE). self.status holds the lifecycle
+# state; per-GPU running states are computed on demand (see _gpuStatus).
 class Status(Enum):
     INACTIVE = "inactive" # not running
     STARTING = "starting" # during start()
-    IDLE     = "idle"     # running, but not serving
-    SERVING  = "serving"  # running with a model loaded to GPU
+    IDLE     = "idle"     # running, nothing in flight
+    SERVING  = "serving"  # actively forwarding a generation
+    SWAPPING = "swapping" # loading or unloading a model (the two are merged)
     STOPPING = "stopping" # during stop()
     ERROR    = "error"    # error
 
@@ -212,7 +217,11 @@ class LLMRouter:
         self._last_load_error: str | None = None # reason the most recent load attempt failed (e.g. worker OOM)
         self.requests:  list[dict[str, Any]] = [] # [{request, future, is_streaming, request_time}, ...]
         self.request_lock = asyncio.Lock()
-        self._load_lock = AsyncRWLock()
+        # One RWLock per GPU (generation = shared reader, load/unload = exclusive
+        # writer). GPUs are independent, so a swap on one GPU never drains work on
+        # another. self._swapping_gpus marks GPUs mid load/unload for status.
+        self._gpu_locks: dict[int, AsyncRWLock] = {g: AsyncRWLock() for g in range(self.num_gpus)}
+        self._swapping_gpus: set[int] = set()
         self._has_requests = asyncio.Event()
         self._running = False
         self._scheduler_task: asyncio.Task[None] | None = None
@@ -518,6 +527,121 @@ class LLMRouter:
             return None
         return proc.poll()
 
+    # Per-GPU concurrency + status
+
+    def _gpuLock(self, gpu: int) -> AsyncRWLock:
+        """Returns the RWLock for a GPU, creating one on demand."""
+        lock = self._gpu_locks.get(gpu)
+        if lock is None:
+            lock = self._gpu_locks[gpu] = AsyncRWLock()
+        return lock
+
+    async def _acquireShared(self, gpus: Iterable[int]):
+        """Acquires the shared (reader) lock of every GPU, in ascending order."""
+        for g in sorted(set(gpus)):
+            await self._gpuLock(g).acquireShared()
+
+    async def _releaseShared(self, gpus: Iterable[int]):
+        """Releases the shared lock of every GPU, in descending order."""
+        for g in sorted(set(gpus), reverse=True):
+            await self._gpuLock(g).releaseShared()
+
+    async def _acquireExclusive(self, gpus: Iterable[int]):
+        """
+        Acquires the exclusive (writer) lock of every GPU, in ascending order
+
+        Ascending order is a global lock ordering, so two overlapping multi-GPU
+        acquisitions can never deadlock against each other.
+        """
+        for g in sorted(set(gpus)):
+            await self._gpuLock(g).acquireExclusive()
+
+    async def _releaseExclusive(self, gpus: Iterable[int]):
+        """Releases the exclusive lock of every GPU, in descending order."""
+        for g in sorted(set(gpus), reverse=True):
+            await self._gpuLock(g).releaseExclusive()
+
+    def _requestGpus(self, model_id: str | None) -> list[int]:
+        """
+        The GPUs a request occupies while being served
+
+        A model's request occupies that model's pinned GPUs; a model-less request
+        (routed to whatever instance is up) is treated as touching every GPU.
+        """
+        if model_id is None:
+            return list(range(self.num_gpus))
+        return self.model_gpus.get(model_id, [0])
+
+    def _gpuStatus(self, gpu: int) -> Status:
+        """
+        Computed running status of a single GPU: swapping > serving > idle
+
+        SWAPPING while a load/unload touching it is in progress, else SERVING if
+        any live replica pinned to it has an in-flight request, else IDLE.
+        """
+        if gpu in self._swapping_gpus:
+            return Status.SWAPPING
+        for port, count in self.inflight.items():
+            if count > 0 and port in self.processes:
+                model = self.port_model.get(port)
+                if model is not None and gpu in self.model_gpus.get(model, [0]):
+                    return Status.SERVING
+        return Status.IDLE
+
+    def _gpusBusy(self, gpus: Iterable[int]) -> bool:
+        """True if any of these GPUs is currently serving or swapping."""
+        return any(self._gpuStatus(g) is not Status.IDLE for g in gpus)
+
+    def gpuStatuses(self) -> dict[int, str]:
+        """
+        Per-GPU status map for reporting
+
+        While the router is in a lifecycle state (inactive/starting/stopping/
+        error) that state applies to every GPU; otherwise each GPU reports its
+        own computed running status.
+        """
+        if self.status in (Status.INACTIVE, Status.STARTING, Status.STOPPING, Status.ERROR):
+            return {g: self.status.value for g in range(self.num_gpus)}
+        return {g: self._gpuStatus(g).value for g in range(self.num_gpus)}
+
+    def overallStatus(self) -> Status:
+        """
+        Aggregate status for global consumers (e.g. the header badge)
+
+        Lifecycle states pass through; while running, the busiest GPU wins
+        (swapping > serving > idle).
+        """
+        if self.status in (Status.INACTIVE, Status.STARTING, Status.STOPPING, Status.ERROR):
+            return self.status
+        per = [self._gpuStatus(g) for g in range(self.num_gpus)]
+        if any(s is Status.SWAPPING for s in per):
+            return Status.SWAPPING
+        if any(s is Status.SERVING for s in per):
+            return Status.SERVING
+        return Status.IDLE
+
+    def _loadAffectedGpus(self, model_id: str, loaded: set[str]) -> list[int]:
+        """
+        The GPUs a load of model_id may mutate (and must therefore lock)
+
+        Its own pinned GPUs, plus the full GPU span of every resident that shares
+        any of those pins: evicting such a resident frees its other GPUs too, so
+        their in-flight work must drain under the same exclusive lock.
+
+        Args:
+            model_id (str)      : The model being loaded
+            loaded (set[str])   : The currently resident models
+
+        Returns:
+            The sorted list of GPU ids the load must hold exclusively
+        """
+        target = set(self.model_gpus.get(model_id, [0]))
+        affected = set(target)
+        for m in loaded:
+            if m != model_id and target & set(self.model_gpus.get(m, [0])):
+                affected.update(self.model_gpus.get(m, [0]))
+        return sorted(affected)
+
     async def _startInstance(self, port: int, model_id: str) -> int | None:
         """
         Spawns one llama-server on port, isolated to model_id's pinned GPUs
@@ -638,7 +762,13 @@ class LLMRouter:
                 self.port_model[port] = model_id
                 print(f"[ROUTER] replica for {model_id} up on port {port} (pid {pid})", flush=True)
                 return True
+            # A worker that exited during load failed deterministically (OOM / bad
+            # preset): retrying just reloads the weights to hit the same wall, so
+            # bail now. Only retry when the process is still alive (transient stall).
+            died_on_load = self._replicaExited(port) is not None
             await self._killInstance(port)
+            if died_on_load:
+                break
         return False
 
     async def _killInstance(self, port: int) -> bool:
@@ -720,7 +850,8 @@ class LLMRouter:
         self.requests.clear()
         self.model_loaded_at.clear()
         self.model_last_used.clear()
-        self._load_lock = AsyncRWLock()
+        self._gpu_locks = {g: AsyncRWLock() for g in range(self.num_gpus)}
+        self._swapping_gpus.clear()
         self.request_lock = asyncio.Lock()
         self._has_requests = asyncio.Event()
         self.status = Status.INACTIVE if all(results) else Status.ERROR
@@ -767,9 +898,22 @@ class LLMRouter:
         if model_id not in self.router_config["LLM"]:
             raise ValueError(f"[LOAD/UNLOAD ERROR] Model [{model_id}] not present in list {list(self.router_config['LLM'].keys())}")
 
-        # Acquires load lock
-        await self._load_lock.acquireExclusive()
-        print(f"[ROUTER] initiate loading of model: {model_id}...")
+        # Acquire the exclusive lock of every GPU this load may mutate. A
+        # concurrent load can add a co-resident between planning and locking,
+        # widening the affected set, so re-derive after acquiring and retry with
+        # the wider set (locks are always taken in ascending GPU order).
+        self._reapDead()
+        affected = self._loadAffectedGpus(model_id, self._loadedModels())
+        while True:
+            await self._acquireExclusive(affected)
+            self._reapDead()
+            wider = self._loadAffectedGpus(model_id, self._loadedModels())
+            if set(wider) <= set(affected):
+                break
+            await self._releaseExclusive(affected)
+            affected = wider
+        self._swapping_gpus.update(affected)
+        print(f"[ROUTER] initiate loading of model: {model_id} (gpus {affected})...")
         try:
             self._reapDead()
             loaded = self._loadedModels()
@@ -815,7 +959,8 @@ class LLMRouter:
             print(f"[LOAD CONFIRMATION] Loaded models: {self._loadedModels()}")
             return True
         finally:
-            await self._load_lock.releaseExclusive()
+            self._swapping_gpus.difference_update(affected)
+            await self._releaseExclusive(affected)
             self._has_requests.set()
 
     async def unloadModel(self, model_id: str):
@@ -825,8 +970,10 @@ class LLMRouter:
         Args:
             model_id (str): The model to unload
         """
-        await self._load_lock.acquireExclusive()
-        print(f"[ROUTER] initiate unloading of model: {model_id}...")
+        gpus = self.model_gpus.get(model_id, [0])
+        await self._acquireExclusive(gpus)
+        self._swapping_gpus.update(gpus)
+        print(f"[ROUTER] initiate unloading of model: {model_id} (gpus {gpus})...")
         try:
             ports = self.modelPorts(model_id)
             if ports:
@@ -835,7 +982,8 @@ class LLMRouter:
             print(f"[UNLOAD SUCCESS] Successfully unloaded {model_id}")
             print(f"[UNLOAD CONFIRMATION] Currently loaded models: {self._loadedModels()}")
         finally:
-            await self._load_lock.releaseExclusive()
+            self._swapping_gpus.difference_update(gpus)
+            await self._releaseExclusive(gpus)
             self._has_requests.set()
 
     # Request handling
@@ -867,7 +1015,6 @@ class LLMRouter:
                 "request_time": time.time(),
             })
             self._has_requests.set()
-            self.status = Status.SERVING
         return future
 
     async def _scheduler(self):
@@ -890,7 +1037,10 @@ class LLMRouter:
                     self._has_requests.clear()
                     continue
 
-                self.status = Status.SERVING
+                # Clear the wake flag BEFORE reading GPU busy-state, so a port
+                # release (or swap completion) that races in after our read still
+                # re-sets it and re-wakes us — no lost wakeup when we defer below.
+                self._has_requests.clear()
                 self._reapDead()
                 loaded = self._loadedModels()
                 # Starvation guard: if the oldest queued request's model is not
@@ -904,21 +1054,29 @@ class LLMRouter:
                     and head_model not in loaded
                     and time.time() - head["request_time"] >= self.QUEUE_FORCE_LOAD_TIMEOUT
                 )
-                if starved:
-                    print(f"[ROUTER] head-of-queue request for {head_model} waited "
-                          f">{self.QUEUE_FORCE_LOAD_TIMEOUT}s, force-loading", flush=True)
-                else:
+                if not starved:
                     # pick a request to serve: first request that matches the model or has no model field
                     for i, entry in enumerate(self.requests):
                         req_model = entry["request"].get("model")
                         if req_model is None or req_model in loaded:
                             chosen_idx = i
                             break
-                # there's a servable request
+                # there's a servable (cache-hit) request: serve it as a concurrent
+                # reader on its GPUs, no loading required
                 if chosen_idx is not None:
                     entry = self.requests.pop(chosen_idx)
-                # otherwise, load the model of the first request
+                # otherwise the head model must be loaded. Unless it's starved,
+                # defer while its GPUs are busy serving or mid-swap: we don't want
+                # to evict/compete with in-flight work there. A port release or
+                # swap completion re-wakes the scheduler to retry the load.
                 else:
+                    head_gpus = self._requestGpus(head_model)
+                    if not starved and self._gpusBusy(head_gpus):
+                        print(f"[ROUTER] deferring load of {head_model}: gpus {head_gpus} busy", flush=True)
+                        continue
+                    if starved:
+                        print(f"[ROUTER] head-of-queue request for {head_model} waited "
+                              f">{self.QUEUE_FORCE_LOAD_TIMEOUT}s, force-loading", flush=True)
                     entry = self.requests.pop(0)
                     model_to_load = entry["request"].get("model")
                     try:
@@ -927,7 +1085,12 @@ class LLMRouter:
                         print(f"[ROUTER] failed to load {model_to_load}: {exc}", flush=True)
                         if not entry["future"].done():
                             entry["future"].set_exception(exc)
+                        self._has_requests.set()  # re-check the remaining queue
                         continue
+                # More requests may remain: re-arm so the next iteration runs
+                # immediately (pipelining) instead of blocking on the wake flag.
+                if self.requests:
+                    self._has_requests.set()
                 served_model = entry["request"].get("model")
                 if served_model:
                     self.model_last_used[served_model] = time.time()
@@ -948,6 +1111,10 @@ class LLMRouter:
                     continue
                 port = min(ports, key=lambda p: (self.inflight.get(p, 0), p))
                 entry["port"] = port
+                # The GPUs this forward holds as a shared reader = the hosting
+                # replica's model pins (tighter than the request's declared model
+                # for model-less requests).
+                entry["gpus"] = self.model_gpus.get(self.port_model.get(port, ""), list(range(self.num_gpus)))
                 self.inflight[port] = self.inflight.get(port, 0) + 1
 
             # Dispatch forwarding as a concurrent task
@@ -967,6 +1134,8 @@ class LLMRouter:
         """
         if port in self.inflight:
             self.inflight[port] = max(0, self.inflight[port] - 1)
+        # A freed GPU may unblock a load the scheduler deferred; re-wake it.
+        self._has_requests.set()
 
     async def _doForward(self, entry: dict[str, Any]):
         """
@@ -977,7 +1146,8 @@ class LLMRouter:
         Args:
             entry (dict): The dispatched request entry with its assigned "port"
         """
-        await self._load_lock.acquireShared()
+        gpus = entry.get("gpus", list(range(self.num_gpus)))
+        await self._acquireShared(gpus)
         try:
             port = entry["port"]
             req = entry["request"]
@@ -1010,9 +1180,8 @@ class LLMRouter:
             if not entry["future"].done():
                 entry["future"].set_exception(e)
         finally:
-            self.status = Status.IDLE
             self._releasePort(entry["port"])
-            await self._load_lock.releaseShared()
+            await self._releaseShared(gpus)
 
     async def _doForwardStreaming(self, entry: dict[str, Any], queue: StreamQueue):
         """
@@ -1025,7 +1194,8 @@ class LLMRouter:
             entry (dict)            : The dispatched request entry with its "port"
             queue (asyncio.Queue)   : The queue chunks are pushed onto
         """
-        await self._load_lock.acquireShared()
+        gpus = entry.get("gpus", list(range(self.num_gpus)))
+        await self._acquireShared(gpus)
         last_data = None
         try:
             port = entry["port"]
@@ -1056,10 +1226,9 @@ class LLMRouter:
         finally:
             queue.put_nowait(None)
             self._releasePort(entry["port"])
-            await self._load_lock.releaseShared()
+            await self._releaseShared(gpus)
             # Record history from the last SSE chunk that contained timings
             if last_data:
-                self.status = Status.IDLE
                 try:
                     timings = last_data.get("timings", {})
                     usage = last_data.get("usage", {})
