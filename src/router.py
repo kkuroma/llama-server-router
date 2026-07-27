@@ -209,6 +209,7 @@ class LLMRouter:
         self.processes: dict[int, subprocess.Popen[bytes]] = {} # port -> Popen
         self.port_model: dict[int, str] = {} # port -> model_id hosted by that process (set once loaded)
         self.inflight: dict[int, int] = {} # port -> requests currently being forwarded
+        self._last_load_error: str | None = None # reason the most recent load attempt failed (e.g. worker OOM)
         self.requests:  list[dict[str, Any]] = [] # [{request, future, is_streaming, request_time}, ...]
         self.request_lock = asyncio.Lock()
         self._load_lock = AsyncRWLock()
@@ -496,6 +497,27 @@ class LLMRouter:
             p += 1
         return ports
 
+    def _replicaExited(self, port: int) -> int | None:
+        """
+        Returns the exit code if the replica process on port has terminated
+
+        A worker that dies mid-startup or mid-load (typically CUDA OOM while
+        building the KV cache / compute buffers) exits with a nonzero code. The
+        health/load poll loops check this so they fail fast with a real error
+        instead of polling a dead port until HEALTH_CHECK_TIMEOUT / LOAD_POLL_TIMEOUT
+        (which silently wedged the router with the load lock held).
+
+        Args:
+            port (int): The port whose process to check
+
+        Returns:
+            The process exit code if it has terminated, otherwise None (running)
+        """
+        proc = self.processes.get(port)
+        if proc is None:
+            return None
+        return proc.poll()
+
     async def _startInstance(self, port: int, model_id: str) -> int | None:
         """
         Spawns one llama-server on port, isolated to model_id's pinned GPUs
@@ -533,6 +555,16 @@ class LLMRouter:
         deadline = asyncio.get_event_loop().time() + self.HEALTH_CHECK_TIMEOUT
         async with httpx.AsyncClient() as client:
             while asyncio.get_event_loop().time() < deadline:
+                # Fail fast if the server process died before it ever went healthy
+                # (bad preset, missing model file, immediate CUDA error) instead of
+                # polling a dead port for the full HEALTH_CHECK_TIMEOUT.
+                code = self._replicaExited(port)
+                if code is not None:
+                    self._last_load_error = (f"{model_id} llama-server on port {port} exited "
+                                             f"(code {code}) before becoming healthy")
+                    print(f"[ROUTER] {self._last_load_error}; aborting start", flush=True)
+                    del self.processes[port]
+                    return None
                 try:
                     resp = await client.get(f"http://0.0.0.0:{port}/health", timeout=2.0)
                     if resp.status_code == 200 and resp.json().get("status") == "ok":
@@ -540,6 +572,8 @@ class LLMRouter:
                 except (httpx.ConnectError, httpx.TimeoutException):
                     pass
                 await asyncio.sleep(self.HEALTH_CHECK_INTERVAL)
+        self._last_load_error = f"{model_id} llama-server on port {port} never became healthy within {self.HEALTH_CHECK_TIMEOUT}s"
+        print(f"[ROUTER] {self._last_load_error}; killing", flush=True)
         proc.kill()
         del self.processes[port]
         return None
@@ -563,6 +597,17 @@ class LLMRouter:
             return False
         deadline = asyncio.get_event_loop().time() + self.LOAD_POLL_TIMEOUT
         while asyncio.get_event_loop().time() < deadline:
+            # The worker loads asynchronously and exits on failure (e.g. CUDA OOM
+            # building the KV/compute buffers). Detect that exit instead of
+            # swallowing the ensuing connection errors and polling a dead port for
+            # the full LOAD_POLL_TIMEOUT with the load lock held — the silent-OOM hang.
+            code = self._replicaExited(port)
+            if code is not None:
+                self._last_load_error = (f"{model_id} worker on port {port} exited (code {code}) "
+                                         f"during load — likely CUDA OOM / insufficient VRAM "
+                                         f"(check the llama-server logs)")
+                print(f"[ROUTER] {self._last_load_error}", flush=True)
+                return False
             try:
                 statuses = await _fetchModelStatuses(port)
                 if statuses.get(model_id) == "loaded":
@@ -570,7 +615,8 @@ class LLMRouter:
             except Exception:
                 pass
             await asyncio.sleep(self.LOAD_POLL_INTERVAL)
-        print(f"[ROUTER] timed out waiting for {model_id} to load on port {port}", flush=True)
+        self._last_load_error = f"timed out after {self.LOAD_POLL_TIMEOUT}s waiting for {model_id} to load on port {port}"
+        print(f"[ROUTER] {self._last_load_error}", flush=True)
         return False
 
     async def _spawnReplica(self, port: int, model_id: str) -> bool:
@@ -613,11 +659,12 @@ class LLMRouter:
         if proc is None:
             return False
         try:
-            proc.terminate() # SIGTERM
-            await asyncio.sleep(self.GRACEFUL_KILL_TIMEOUT)
-            if proc.poll() is None: # still running?
-                proc.kill() # SIGKILL
-            proc.wait()
+            if proc.poll() is None: # still running -> SIGTERM, escalate to SIGKILL
+                proc.terminate()
+                await asyncio.sleep(self.GRACEFUL_KILL_TIMEOUT)
+                if proc.poll() is None:
+                    proc.kill() # SIGKILL
+            proc.wait() # reap (already-exited workers, e.g. OOM, land here too)
             del self.processes[port]
             self.port_model.pop(port, None)
             self.inflight.pop(port, None)
@@ -749,13 +796,15 @@ class LLMRouter:
             needed = target - len(have)
             if needed > 0:
                 ports = self._allocPorts(needed)
+                self._last_load_error = None
                 results = await asyncio.gather(
                     *[self._spawnReplica(port, model_id) for port in ports],
                     return_exceptions=True,
                 )
                 up = sum(1 for r in results if r is True)
                 if up == 0:
-                    raise RuntimeError(f"[LOAD/UNLOAD ERROR] Failed to start any replica for {model_id}")
+                    reason = self._last_load_error or "no replica became healthy"
+                    raise RuntimeError(f"[LOAD/UNLOAD ERROR] Failed to start any replica for {model_id}: {reason}")
                 if up < needed:
                     print(f"[ROUTER] only {up}/{needed} new replicas for {model_id} came up", flush=True)
 
