@@ -139,6 +139,9 @@ async def routerLoad(body: ModelActionRequest):
 
     Raises:
         HTTPException: 422 if "model" is missing, 404 if the model is unknown
+
+    Returns a 502 with the failure reason (e.g. worker CUDA OOM) instead of a
+    bare 500 when the load fails, so the dashboard can surface why.
     """
     r = getRouter()
     model_id = body.get("model")
@@ -146,7 +149,13 @@ async def routerLoad(body: ModelActionRequest):
         raise HTTPException(status_code=422, detail="Missing 'model' field")
     if not(model_id in r.router_config["LLM"].keys()):
         raise HTTPException(status_code=404, detail=f"Model {model_id} not found")
-    result = await r.loadModel(model_id)
+    try:
+        result = await r.loadModel(model_id)
+    except Exception as e:
+        return JSONResponse(
+            status_code=502,
+            content={"success": False, "error": {"message": str(e), "code": "load_failed"}},
+        )
     return {"success": result}
 
 

@@ -138,22 +138,28 @@ class AsyncRWLock:
             self._writer_ok.notify()
 
 
-async def _fetchModelStatuses(port: int) -> dict[str, str]:
+async def _fetchModelReports(port: int) -> dict[str, dict[str, Any]]:
     """
-    Queries a single llama-server instance for the status of its models
+    Queries a single llama-server instance for the full status of its models
+
+    Returns each model's whole status object, not just its value: llama-server's
+    multi-model supervisor keeps running (and /health stays 200) even when a
+    model's worker dies loading, and only signals that failure inside the status
+    object as "failed": true / "exit_code": N (e.g. CUDA OOM building the KV
+    cache). Callers need those fields to fail fast instead of polling to timeout.
 
     Args:
         port (int): The port of the llama-server instance to query
 
     Returns:
-        A {model_id: status_value} map for every model the instance reports
+        A {model_id: status_object} map for every model the instance reports
     """
     async with httpx.AsyncClient() as client:
         resp = await client.get(f"http://0.0.0.0:{port}/models", timeout=5.0)
         resp.raise_for_status()
         data = resp.json()
         return {
-            m.get("id"): m.get("status", {}).get("value", "unknown")
+            m.get("id"): (m.get("status") or {})
             for m in data.get("data", [])
         }
 
@@ -215,6 +221,7 @@ class LLMRouter:
         self.port_model: dict[int, str] = {} # port -> model_id hosted by that process (set once loaded)
         self.inflight: dict[int, int] = {} # port -> requests currently being forwarded
         self._last_load_error: str | None = None # reason the most recent load attempt failed (e.g. worker OOM)
+        self._last_load_fatal: bool = False # True if that failure was deterministic (worker exited/failed) -> don't retry
         self.requests:  list[dict[str, Any]] = [] # [{request, future, is_streaming, request_time}, ...]
         self.request_lock = asyncio.Lock()
         # One RWLock per GPU (generation = shared reader, load/unload = exclusive
@@ -713,29 +720,49 @@ class LLMRouter:
         Returns:
             True once the instance reports the model "loaded", else False
         """
+        self._last_load_fatal = False
         try:
             async with httpx.AsyncClient() as client:
-                await client.post(f"http://0.0.0.0:{port}/models/load", json={"model": model_id}, timeout=120.0)
+                resp = await client.post(f"http://0.0.0.0:{port}/models/load", json={"model": model_id}, timeout=self.LOAD_POLL_TIMEOUT)
         except Exception as exc:
             print(f"[ROUTER] load request to port {port} failed: {exc}", flush=True)
             return False
+        # A 4xx/5xx here is a deterministic rejection (bad preset, or the worker
+        # OOM'd and the supervisor reported it synchronously) — don't retry.
+        if resp.status_code >= 400:
+            self._last_load_error = (f"{model_id} load rejected by worker on port {port} "
+                                     f"(HTTP {resp.status_code}): {resp.text[:200]}")
+            self._last_load_fatal = True
+            print(f"[ROUTER] {self._last_load_error}", flush=True)
+            return False
         deadline = asyncio.get_event_loop().time() + self.LOAD_POLL_TIMEOUT
         while asyncio.get_event_loop().time() < deadline:
-            # The worker loads asynchronously and exits on failure (e.g. CUDA OOM
-            # building the KV/compute buffers). Detect that exit instead of
-            # swallowing the ensuing connection errors and polling a dead port for
-            # the full LOAD_POLL_TIMEOUT with the load lock held — the silent-OOM hang.
+            # The worker loads asynchronously and fails on OOM (e.g. building the
+            # KV/compute buffers for a huge ctx-size). Two failure shapes, both
+            # fatal — fail fast instead of polling for the full LOAD_POLL_TIMEOUT
+            # with the GPU exclusive lock held (the silent-OOM swapping hang):
+            #   1) the whole llama-server process exits, or
+            #   2) only the model worker dies; the supervisor stays healthy but
+            #      marks the model "failed": true / "exit_code": N in /models.
             code = self._replicaExited(port)
             if code is not None:
                 self._last_load_error = (f"{model_id} worker on port {port} exited (code {code}) "
                                          f"during load — likely CUDA OOM / insufficient VRAM "
                                          f"(check the llama-server logs)")
+                self._last_load_fatal = True
                 print(f"[ROUTER] {self._last_load_error}", flush=True)
                 return False
             try:
-                statuses = await _fetchModelStatuses(port)
-                if statuses.get(model_id) == "loaded":
+                status = (await _fetchModelReports(port)).get(model_id, {})
+                if status.get("value") == "loaded":
                     return True
+                if status.get("failed") or (status.get("exit_code") not in (None, 0)):
+                    self._last_load_error = (f"{model_id} worker on port {port} failed to load "
+                                             f"(exit_code {status.get('exit_code')}) — likely CUDA OOM / "
+                                             f"insufficient VRAM for its ctx-size (check the llama-server logs)")
+                    self._last_load_fatal = True
+                    print(f"[ROUTER] {self._last_load_error}", flush=True)
+                    return False
             except Exception:
                 pass
             await asyncio.sleep(self.LOAD_POLL_INTERVAL)
@@ -762,12 +789,13 @@ class LLMRouter:
                 self.port_model[port] = model_id
                 print(f"[ROUTER] replica for {model_id} up on port {port} (pid {pid})", flush=True)
                 return True
-            # A worker that exited during load failed deterministically (OOM / bad
-            # preset): retrying just reloads the weights to hit the same wall, so
-            # bail now. Only retry when the process is still alive (transient stall).
-            died_on_load = self._replicaExited(port) is not None
+            # A deterministic load failure (worker exited / reported "failed" /
+            # load rejected — flagged by _loadInto, or the whole process died)
+            # will just hit the same wall on retry, so bail now. Only retry a
+            # transient stall (process still alive and no hard failure flagged).
+            fatal = self._last_load_fatal or self._replicaExited(port) is not None
             await self._killInstance(port)
-            if died_on_load:
+            if fatal:
                 break
         return False
 
