@@ -25,6 +25,10 @@
       font-size: 0.8rem; transition: background 0.15s, color 0.15s;
     }
     .chat-tab:hover { background: var(--surface1); }
+    /* Model load/unload chips: daisyUI's btn-ghost hover tints with base-content
+       (white in dark themes) — the same token as the label — so the text washes
+       out to white-on-white. Pin hover to surface tokens for readable contrast. */
+    .model-chip.btn-ghost:hover { background: var(--surface1); color: var(--text); }
     .chat-tab.active { background: var(--surface1); color: var(--text); border-color: var(--overlay0); }
     /* The embedded llama.cpp UI fills the remaining space. */
     .chat-frame { width: 100%; height: 100%; border: 0; display: block; background: var(--base); }
@@ -86,7 +90,7 @@
           <div class="flex items-center gap-2 flex-wrap">
             <span class="text-xs font-semibold uppercase tracking-wider opacity-60 mr-1">Models</span>
             <button v-for="m in models" :key="m.id"
-              class="btn btn-xs gap-1.5"
+              class="btn btn-xs gap-1.5 model-chip"
               :class="m.loaded ? 'btn-outline btn-success' : 'btn-ghost'"
               @click="m.loaded ? unloadModel(m.id) : loadModel(m.id)"
               :disabled="m.loading">

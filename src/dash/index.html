@@ -22,6 +22,13 @@
     .history-chart { width: 100%; height: 300px; }
     /* Model color dot stripe on model rows */
     .model-row { border-left: 3px solid transparent; }
+    /* Per-GPU assignment tag on model rows: color-coded by physical GPU index. */
+    .gpu-tag {
+      font-size: 0.6rem; font-weight: 600; line-height: 1;
+      font-family: ui-monospace, monospace; letter-spacing: 0.02em;
+      padding: 0.15rem 0.3rem; border-radius: 0.35rem;
+      border: 1px solid currentColor; white-space: nowrap;
+    }
     /* Compact summary stat cell above the history chart. */
     .stat-cell {
       display: flex; flex-direction: column; gap: 0.1rem;
@@ -139,14 +146,23 @@
                     :style="{ backgroundColor: m.loaded ? modelColor(m.id) : 'transparent', border: m.loaded ? 'none' : '1.5px solid ' + modelColor(m.id), opacity: m.loaded ? 1 : 0.4 }"></div>
                   <span class="font-mono text-xs truncate" :title="m.id" :style="{ color: modelColor(m.id) }">{{ m.id }}</span>
                 </div>
-                <button class="btn btn-xs flex-shrink-0"
+                <div class="flex items-center gap-2 flex-shrink-0">
+                  <!-- GPU assignment: fixed placement from config.json, one
+                       color-coded tag per physical GPU this model is pinned to. -->
+                  <div v-if="m.gpus && m.gpus.length" class="flex items-center gap-1"
+                    :title="'Assigned to GPU ' + m.gpus.join(', ')">
+                    <span v-for="g in m.gpus" :key="g" class="gpu-tag"
+                      :style="{ color: gpuColor(g) }">GPU {{ g }}</span>
+                  </div>
+                  <button class="btn btn-xs flex-shrink-0"
                   :style="m.loading ? {} : { borderColor: modelColor(m.id), color: modelColor(m.id), backgroundColor: 'transparent' }"
                   :class="m.loading ? 'btn-disabled' : ''"
                   @click="m.loaded ? unloadModel(m.id) : loadModel(m.id)"
                   :disabled="m.loading">
                   <span v-if="m.loading" class="loading loading-spinner loading-xs"></span>
                   <span v-else class="text-xs">{{ m.loaded ? 'Unload' : 'Load' }}</span>
-                </button>
+                  </button>
+                </div>
               </div>
                 <div v-if="models.length === 0" class="text-xs opacity-40 text-center py-2">No models</div>
               </div>
@@ -435,6 +451,23 @@
           return pal()[modelColorMap[modelId]];
         }
 
+        // Palette keys cycled by physical GPU index so each GPU keeps one stable
+        // color across every model row (GPU 0 is always the first key, etc.).
+        const GPU_COLOR_KEYS = ['sky', 'peach', 'green', 'mauve', 'yellow', 'teal', 'pink', 'flamingo', 'blue', 'lavender'];
+
+        /**
+         * Resolves the palette color for a physical GPU index.
+         *
+         * The mapping is deterministic (index → fixed palette key), so a given
+         * GPU is drawn in the same color everywhere it appears.
+         *
+         * @param {number} idx  - the physical GPU index
+         * @returns {string} a hex color from the active seasonal palette
+         */
+        function gpuColor(idx) {
+          return pal()[GPU_COLOR_KEYS[idx % GPU_COLOR_KEYS.length]];
+        }
+
         const statusColor = computed(() => {
           const map = {
             idle: 'badge-info', serving: 'badge-success', swapping: 'badge-secondary',
@@ -502,6 +535,7 @@
               id: m.id,
               loaded: m.status?.value === 'loaded',
               args: m.status?.args || [],
+              gpus: m.gpus || [],
               loading: !!loadingModels[m.id],
             }));
             // Pre-assign colors for all models
@@ -978,7 +1012,7 @@
           historySort, historyChartMode, statusColor, statusDotClass, sortedHistory,
           ranges: RANGES, historyRange, setHistoryRange, historyStats,
           pal_blue, pal_green, fmtStat: fmtNum,
-          formatTime, fetchHistory, routerAction, modelColor,
+          formatTime, fetchHistory, routerAction, modelColor, gpuColor,
           loadModel, unloadModel, resetHistory, sortHistory, updateHistoryChart,
           gpuUtilChart, gpuVramChart, statusChart, historyChart,
         };
