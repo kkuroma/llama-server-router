@@ -1,68 +1,37 @@
 <!DOCTYPE html>
-<html lang="en" data-theme="seasons">
+<html lang="en">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>LLaMa Router — Dashboard</title>
-  <!-- Seasonal design language (fonts + palette + pill navbar + Aa popover).
-       theme.js is loaded synchronously and init()'d here so the saved palette
-       is applied before first paint (no flash). -->
+  <title>LLaMa Router - Dashboard</title>
+  <!-- theme.js is loaded synchronously and init()'d here so the saved palette
+       applies before first paint (no flash). -->
   <link rel="preload" href="/webui/fonts/GoogleSansFlex.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="/webui/theme.css" />
+  <link rel="stylesheet" href="/dash/assets/css/dash.css" />
   <script src="/webui/theme.js"></script>
   <script>window.LRTheme.init();</script>
-  <link href="https://cdn.jsdelivr.net/npm/daisyui@4/dist/full.min.css" rel="stylesheet" />
-  <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://cdn.jsdelivr.net/npm/vue@3/dist/vue.global.prod.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
-  <script>tailwind.config = { theme: { extend: {} } };</script>
-  <style>
-    .chart-container { width: 100%; height: 220px; }
-    /* Request-history plot is taller to make room for the zoom slider + axis. */
-    .history-chart { width: 100%; height: 300px; }
-    /* Model color stripe on model rows */
-    .model-row { border-left: 3px solid transparent; }
-    /* Per-GPU dot on a model row's second line: one per physical GPU, colored
-       for the GPUs the model is pinned to (solid when the model is loaded,
-       hollow outline when not) and faint for GPUs it never touches. */
-    .gpu-dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; box-sizing: border-box; }
-    /* Parsed name tags: param/active-param counts (colored) + plain descriptor
-       tags (neutral). Small, monospace, wrap to the right of the row. */
-    .model-tag {
-      font-family: ui-monospace, monospace; font-size: 0.55rem; line-height: 1.1;
-      padding: 1px 4px; border-radius: 3px; border: 1px solid transparent; white-space: nowrap;
-    }
-    /* Compact summary stat cell above the history chart. */
-    .stat-cell {
-      display: flex; flex-direction: column; gap: 0.1rem;
-      padding: 0.4rem 0.7rem; border-radius: 0.6rem;
-      background: var(--surface0); border: 1px solid var(--surface1); min-width: 0;
-    }
-    .stat-cell .stat-k { font-size: 0.62rem; text-transform: uppercase; letter-spacing: 0.05em; opacity: 0.55; }
-    .stat-cell .stat-v { font-size: 1.05rem; font-weight: 600; font-family: ui-monospace, monospace; line-height: 1.1; }
-    .stat-cell .stat-v small { font-size: 0.62rem; font-weight: 500; opacity: 0.6; margin-left: 0.15rem; }
-  </style>
 </head>
-<body class="min-h-screen bg-base-100 text-base-content">
+<body>
   <div id="app">
-    <!-- Floating pill navbar -->
     <div class="lr-navbar">
       <div class="lr-brand">
         <span class="lr-brand-name">LLaMa Router</span>
-        <div class="flex items-center gap-1.5">
-          <span class="opacity-50 text-sm">(</span>
-          <div class="w-2 h-2 rounded-full flex-shrink-0" :class="statusDotClass"></div>
-          <span class="font-mono text-sm opacity-70">{{ routerStatus }}</span>
-          <span class="opacity-50 text-sm">)</span>
+        <div class="brand-status mono">
+          <span class="dim">(</span>
+          <span class="status-dot" :class="{ pulse: statusPulse }" :style="statusDotStyle"></span>
+          <span class="status-name">{{ routerStatus }}</span>
+          <span class="dim">)</span>
         </div>
       </div>
-      <div class="flex items-center gap-2">
+      <div class="nav-right">
         <nav class="lr-nav-links">
           <a href="/chat" class="nav-link">Chat</a>
           <a href="/dash" class="nav-link active">Dashboard</a>
           <a href="/translate" class="nav-link">Translate</a>
         </nav>
-        <!-- "Aa" appearance popover: palette / mode / text size -->
         <details class="settings-menu">
           <summary class="settings-toggle" title="Appearance">Aa</summary>
           <div class="settings-body">
@@ -89,1065 +58,180 @@
       </div>
     </div>
 
-    <!-- Main content -->
-    <div class="flex flex-col lg:flex-row gap-4 p-4 max-w-screen-2xl mx-auto">
-
-      <!-- Left panel: stretches to the right panel's height; Models fills the
-           remainder and scrolls internally when it overflows. -->
-      <div class="w-full lg:w-[320px] flex-shrink-0 flex flex-col gap-4 min-h-0">
-        <!-- Router controls -->
-        <div class="card bg-base-200 border border-base-300 flex-shrink-0">
-          <div class="card-body p-4 gap-3">
-            <h2 class="text-xs font-semibold uppercase tracking-wider opacity-60">Router</h2>
-            <div class="flex items-center gap-2">
-              <div class="w-2 h-2 rounded-full" :class="statusDotClass"></div>
-              <span class="font-mono text-sm">{{ routerStatus }}</span>
-            </div>
-            <div class="text-xs opacity-50 font-mono" v-if="routerPorts.length">
-              ports {{ routerPorts.join(', ') }}
-            </div>
-            <div class="flex gap-2">
-              <button class="btn btn-sm flex-1"
-                :class="routerLoading === 'start' ? 'btn-disabled' : 'btn-outline btn-success'"
-                @click="routerAction('start')"
-                :disabled="!['inactive','error'].includes(routerStatus) || routerLoading">
-                <span v-if="routerLoading === 'start'" class="loading loading-spinner loading-xs"></span>
-                <span v-else>Start</span>
-              </button>
-              <button class="btn btn-sm flex-1"
-                :class="routerLoading === 'stop' ? 'btn-disabled' : 'btn-outline btn-error'"
-                @click="routerAction('stop')"
-                :disabled="['inactive','error'].includes(routerStatus) || routerLoading">
-                <span v-if="routerLoading === 'stop'" class="loading loading-spinner loading-xs"></span>
-                <span v-else>Stop</span>
-              </button>
-              <button class="btn btn-sm flex-1"
-                :class="routerLoading === 'restart' ? 'btn-disabled' : 'btn-outline btn-warning'"
-                @click="routerAction('restart')"
-                :disabled="!!routerLoading">
-                <span v-if="routerLoading === 'restart'" class="loading loading-spinner loading-xs"></span>
-                <span v-else>Restart</span>
-              </button>
-            </div>
+    <div class="dash-main">
+      <div class="col-side">
+        <div class="card">
+          <h2 class="panel-title">Router</h2>
+          <div class="row">
+            <span class="status-dot" :class="{ pulse: statusPulse }" :style="statusDotStyle"></span>
+            <span class="status-text mono">{{ routerStatus }}</span>
+          </div>
+          <div class="ports mono" v-if="routerPorts.length">ports {{ routerPorts.join(', ') }}</div>
+          <div class="btn-row">
+            <button class="action-btn green" @click="routerAction('start')"
+              :disabled="!['inactive','error'].includes(routerStatus) || routerLoading">
+              <span v-if="routerLoading === 'start'" class="spinner"></span>
+              <span v-else>Start</span>
+            </button>
+            <button class="action-btn red" @click="routerAction('stop')"
+              :disabled="['inactive','error'].includes(routerStatus) || routerLoading">
+              <span v-if="routerLoading === 'stop'" class="spinner"></span>
+              <span v-else>Stop</span>
+            </button>
+            <button class="action-btn yellow" @click="routerAction('restart')" :disabled="!!routerLoading">
+              <span v-if="routerLoading === 'restart'" class="spinner"></span>
+              <span v-else>Restart</span>
+            </button>
           </div>
         </div>
 
-        <!-- Models: fills the left column and scrolls internally. On lg the scroll
-             pane is absolutely positioned so a long model list can't inflate the
-             column past the right panel — keeping the dashboard a neat rectangle.
-             On mobile it flows normally with a height cap. -->
-        <div class="card bg-base-200 border border-base-300 lg:flex-1 lg:min-h-0 overflow-hidden">
-          <div class="card-body p-4 gap-3 min-h-0 flex-1">
-            <div class="flex items-center justify-between gap-2 flex-shrink-0">
-              <h2 class="text-xs font-semibold uppercase tracking-wider opacity-60">Models</h2>
-              <!-- Color key for the per-row GPU underlines: each GPU number in
-                   its own color, matching the underline segments below. -->
-              <div v-if="gpuLegend.length" class="flex items-center gap-1 font-mono text-[0.6rem]">
-                <span class="uppercase tracking-wider opacity-40">GPU:</span>
-                <span v-for="g in gpuLegend" :key="g" class="font-semibold"
-                  :style="{ color: gpuColor(g) }">{{ g }}</span>
-              </div>
+        <div class="card models-card">
+          <div class="card-head">
+            <h2 class="panel-title">Models</h2>
+            <!-- Color key for the per-row GPU dots: each GPU number in its own color. -->
+            <div v-if="gpuLegend.length" class="gpu-legend mono">
+              <span class="legend-label">GPU:</span>
+              <span v-for="g in gpuLegend" :key="g" :style="{ color: gpuColor(g) }">{{ g }}</span>
             </div>
-            <div class="relative min-h-0 lg:flex-1">
-              <div class="space-y-2 overflow-y-auto pr-1 max-h-96 lg:max-h-none lg:absolute lg:inset-0">
-              <div v-for="m in models" :key="m.id"
-                class="model-row flex items-stretch gap-2 px-2 py-1.5 rounded-lg bg-base-100/50"
-                :style="{ borderLeftColor: modelColor(m.id) }">
-                <!-- Left: two left-aligned lines (name + param tags, then GPU
-                     dots + descriptor tags). -->
-                <div class="flex-1 min-w-0 flex flex-col gap-1">
-                  <!-- Line 1: model name + param/active-param tags. -->
-                  <div class="flex items-center gap-1.5 min-w-0">
-                    <span class="font-mono text-xs truncate" :title="m.id" :style="{ color: modelColor(m.id) }">{{ m.displayName }}</span>
-                    <span v-for="(t, i) in m.paramTags" :key="i" class="model-tag flex-shrink-0"
-                      :style="tagStyle(t)">{{ t.text }}</span>
-                  </div>
-                  <!-- Line 2: GPU dots — one per physical GPU, lit for the GPUs
-                       this model is pinned to when loaded — + descriptor tags. -->
-                  <div class="flex items-center gap-1.5 min-w-0">
-                    <div class="flex items-center gap-1 flex-shrink-0">
-                      <span class="text-[0.55rem] uppercase tracking-wider opacity-40 font-mono">GPU</span>
-                      <span v-for="d in gpuDots(m)" :key="d.idx" class="gpu-dot"
-                        :style="dotStyle(d, m.loaded)"
-                        :title="'GPU ' + d.idx + (d.assigned ? (m.loaded ? ' — loaded' : ' — assigned') : '')"></span>
-                    </div>
-                    <div v-if="m.plainTags.length" class="flex items-center gap-1 flex-wrap min-w-0">
-                      <span v-for="(t, i) in m.plainTags" :key="i" class="model-tag"
-                        :style="tagStyle(t)">{{ t.text }}</span>
-                    </div>
-                  </div>
+          </div>
+          <div class="model-list">
+            <div v-for="m in models" :key="m.id" class="model-row"
+              :style="{ borderLeftColor: stripColor(m) }">
+              <div class="model-info">
+                <div class="model-line">
+                  <span class="model-name mono" :title="m.id" :style="{ color: modelColor(m.id) }">{{ m.displayName }}</span>
+                  <span v-for="(t, i) in m.paramTags" :key="i" class="model-tag" :style="tagStyle(t)">{{ t.text }}</span>
                 </div>
-                <!-- Load/unload spans the full height of both lines. -->
-                <button class="btn btn-xs flex-shrink-0 self-stretch h-auto"
-                  :style="m.loading ? {} : { borderColor: modelColor(m.id), color: modelColor(m.id), backgroundColor: 'transparent' }"
-                  :class="m.loading ? 'btn-disabled' : ''"
-                  @click="m.loaded ? unloadModel(m.id) : loadModel(m.id)"
-                  :disabled="m.loading">
-                  <span v-if="m.loading" class="loading loading-spinner loading-xs"></span>
-                  <span v-else class="text-xs">{{ m.loaded ? 'Unload' : 'Load' }}</span>
-                </button>
+                <div class="model-line wrap">
+                  <span class="gpu-group">
+                    <span class="gpu-label mono">GPU</span>
+                    <span v-for="d in gpuDots(m)" :key="d.idx" class="gpu-num mono"
+                      :style="gpuNumStyle(d)"
+                      :title="'GPU ' + d.idx + (d.assigned ? ' - assigned' : '')">{{ d.idx }}</span>
+                  </span>
+                  <span v-for="(t, i) in m.plainTags" :key="i" class="model-tag" :style="tagStyle(t)">{{ t.text }}</span>
+                </div>
               </div>
-                <div v-if="models.length === 0" class="text-xs opacity-40 text-center py-2">No models</div>
-              </div>
+              <button class="row-btn" :disabled="m.loading" @click="toggleModel(m)"
+                :style="m.loading ? {} : { borderColor: modelColor(m.id), color: modelColor(m.id) }">
+                <span v-if="m.loading" class="spinner"></span>
+                <span v-else>{{ m.loaded ? 'Unload' : 'Load' }}</span>
+              </button>
             </div>
+            <div v-if="models.length === 0" class="empty">No models</div>
           </div>
         </div>
       </div>
 
-      <!-- Right panel -->
-      <div class="flex-1 space-y-4 min-w-0">
-        <!-- GPU charts row: utilization + VRAM share one box (with a per-GPU
-             selector when there are multiple GPUs); status is its own box. -->
-        <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
-          <div class="card bg-base-200 border border-base-300 lg:col-span-2">
-            <div class="card-body p-4 gap-2">
-              <div class="flex items-center justify-between flex-wrap gap-2">
-                <div class="flex items-center gap-2 min-w-0">
-                  <h2 class="text-xs font-semibold uppercase tracking-wider opacity-60">GPU</h2>
-                  <span class="text-xs opacity-50 font-mono truncate" :title="selectedGpuName">{{ selectedGpuName }}</span>
-                </div>
-                <div v-if="gpus.length > 1" class="seg" style="margin: 0">
-                  <button v-for="g in gpus" :key="g.index" class="seg-btn"
-                    :class="{ active: g.index === selectedGpu }"
-                    :title="g.name" @click="selectGpu(g.index)">GPU {{ g.index }}</button>
-                </div>
-              </div>
-              <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
-                  <div class="text-[0.65rem] font-semibold uppercase tracking-wider opacity-40 mb-1">Utilization</div>
-                  <div ref="gpuUtilChart" class="chart-container"></div>
-                </div>
-                <div>
-                  <div class="text-[0.65rem] font-semibold uppercase tracking-wider opacity-40 mb-1">VRAM</div>
-                  <div ref="gpuVramChart" class="chart-container"></div>
-                </div>
+      <div class="col-charts">
+        <div class="charts-row">
+          <div class="card">
+            <div class="card-head">
+              <h2 class="panel-title">GPU</h2>
+              <div v-if="gpuLegend.length" class="gpu-legend mono">
+                <span class="legend-label">GPU:</span>
+                <span v-for="g in gpuLegend" :key="g" :style="{ color: gpuColor(g) }"
+                  :title="gpuName(g)">{{ g }}</span>
               </div>
             </div>
+            <div ref="gpuChart" class="gpu-chart"></div>
           </div>
-          <div class="card bg-base-200 border border-base-300">
-            <div class="card-body p-4 gap-1">
-              <h2 class="text-xs font-semibold uppercase tracking-wider opacity-60">Router Status</h2>
-              <div ref="statusChart" class="chart-container"></div>
-            </div>
+          <div class="card">
+            <h2 class="panel-title">Router Status</h2>
+            <div ref="statusChart" class="chart-fill"></div>
           </div>
         </div>
 
-        <!-- Request history -->
-        <div class="card bg-base-200 border border-base-300">
-          <div class="card-body p-4 gap-3">
-            <div class="flex items-center justify-between flex-wrap gap-2">
-              <h2 class="text-xs font-semibold uppercase tracking-wider opacity-60">Request History</h2>
-              <div class="flex items-center gap-2 flex-wrap">
-                <!-- Time window: sets how far back to load; the chart's zoom
-                     slider refines within it and the axis resolution follows. -->
-                <div class="join">
-                  <button v-for="r in ranges" :key="r.key" class="join-item btn btn-xs"
-                    :class="historyRange === r.key ? 'btn-active' : 'btn-ghost'"
-                    @click="setHistoryRange(r.key)">{{ r.label }}</button>
-                </div>
-                <div class="join">
-                  <button class="join-item btn btn-xs" :class="historyChartMode === 'static' ? 'btn-active' : 'btn-ghost'"
-                    @click="historyChartMode = 'static'; updateHistoryChart()">Static</button>
-                  <button class="join-item btn btn-xs" :class="historyChartMode === 'cumulative' ? 'btn-active' : 'btn-ghost'"
-                    @click="historyChartMode = 'cumulative'; updateHistoryChart()">Cumulative</button>
-                </div>
-                <select class="select select-xs select-bordered bg-base-100" v-model="historyModel" @change="fetchHistory">
-                  <option value="">All Models</option>
-                  <option v-for="m in models" :key="m.id" :value="m.id">{{ m.id }}</option>
-                </select>
-                <button class="btn btn-xs btn-ghost opacity-60 hover:opacity-100" @click="resetHistory" title="Clear history">
-                  <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
-                </button>
+        <div class="card history-card">
+          <div class="card-head">
+            <h2 class="panel-title">Request History</h2>
+            <div class="history-controls">
+              <!-- Time window: how far back to load; the chart's zoom slider
+                   refines within it. -->
+              <div class="btn-group">
+                <button v-for="r in ranges" :key="r.key" class="seg-btn"
+                  :class="{ active: historyRange === r.key }"
+                  @click="setHistoryRange(r.key)">{{ r.label }}</button>
               </div>
+              <div class="btn-group">
+                <button class="seg-btn" :class="{ active: historyChartMode === 'static' }"
+                  @click="setChartMode('static')">Static</button>
+                <button class="seg-btn" :class="{ active: historyChartMode === 'cumulative' }"
+                  @click="setChartMode('cumulative')">Cumulative</button>
+              </div>
+              <select class="model-select mono" v-model="historyModel" @change="fetchHistory">
+                <option value="">All Models</option>
+                <option v-for="m in models" :key="m.id" :value="m.id">{{ m.id }}</option>
+              </select>
+              <button class="icon-btn" @click="resetHistory" title="Clear history">
+                <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
+              </button>
             </div>
-            <!-- Summary for the loaded window -->
-            <div class="grid grid-cols-2 sm:grid-cols-4 gap-2">
-              <div class="stat-cell">
-                <span class="stat-k">Requests</span>
-                <span class="stat-v">{{ historyStats.reqs.toLocaleString() }}</span>
-              </div>
-              <div class="stat-cell">
-                <span class="stat-k">Prompt tokens</span>
-                <span class="stat-v" :style="{ color: pal_blue }">{{ fmtStat(historyStats.prompt) }}</span>
-              </div>
-              <div class="stat-cell">
-                <span class="stat-k">Predicted tokens</span>
-                <span class="stat-v" :style="{ color: pal_green }">{{ fmtStat(historyStats.predicted) }}</span>
-              </div>
-              <div class="stat-cell">
-                <span class="stat-k">Avg generation</span>
-                <span class="stat-v">{{ historyStats.tokPerSec.toFixed(1) }}<small>tok/s</small></span>
-              </div>
+          </div>
+          <div class="stats-grid">
+            <div class="stat-cell">
+              <span class="stat-k">Requests</span>
+              <span class="stat-v">{{ historyStats.reqs.toLocaleString() }}</span>
             </div>
-            <div ref="historyChart" class="history-chart"></div>
-            <div class="overflow-x-auto max-h-60 overflow-y-auto">
-              <table class="table table-xs table-pin-rows">
-                <thead>
-                  <tr class="text-xs opacity-60">
-                    <th class="cursor-pointer select-none" @click="sortHistory('model')">
-                      Model <span v-if="historySort.key==='model'" class="opacity-40">{{ historySort.asc ? '▲' : '▼' }}</span>
-                    </th>
-                    <th class="cursor-pointer select-none" @click="sortHistory('request_time')">
-                      Request time <span v-if="historySort.key==='request_time'" class="opacity-40">{{ historySort.asc ? '▲' : '▼' }}</span>
-                    </th>
-                    <th class="cursor-pointer select-none" @click="sortHistory('response_time')">
-                      Responded time <span v-if="historySort.key==='response_time'" class="opacity-40">{{ historySort.asc ? '▲' : '▼' }}</span>
-                    </th>
-                    <th class="cursor-pointer select-none" @click="sortHistory('duration')">
-                      Duration <span v-if="historySort.key==='duration'" class="opacity-40">{{ historySort.asc ? '▲' : '▼' }}</span>
-                    </th>
-                    <th class="cursor-pointer select-none" @click="sortHistory('prompt_n')">
-                      Prompt <span v-if="historySort.key==='prompt_n'" class="opacity-40">{{ historySort.asc ? '▲' : '▼' }}</span>
-                    </th>
-                    <th class="cursor-pointer select-none" @click="sortHistory('predicted_n')">
-                      Predicted <span v-if="historySort.key==='predicted_n'" class="opacity-40">{{ historySort.asc ? '▲' : '▼' }}</span>
-                    </th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr v-for="h in sortedHistory" :key="h.id" class="hover"
-                    :style="{ borderLeft: '3px solid ' + modelColor(h.model) }">
-                    <td class="font-mono text-xs max-w-[120px] truncate" :style="{ color: modelColor(h.model) }">{{ h.model }}</td>
-                    <td class="text-xs opacity-70 whitespace-nowrap">{{ formatTime(h.request_time) }}</td>
-                    <td class="text-xs opacity-70 whitespace-nowrap">{{ formatTime(h.response_time) }}</td>
-                    <td class="text-xs font-mono opacity-70">{{ (h.response_time - h.request_time).toFixed(1) }}s</td>
-                    <td class="text-xs font-mono">{{ h.prompt_n.toLocaleString() }}</td>
-                    <td class="text-xs font-mono">{{ h.predicted_n.toLocaleString() }}</td>
-                  </tr>
-                  <tr v-if="history.length === 0">
-                    <td colspan="6" class="text-center opacity-30 py-4">No requests recorded</td>
-                  </tr>
-                </tbody>
-              </table>
+            <div class="stat-cell">
+              <span class="stat-k">Prompt tokens</span>
+              <span class="stat-v" :style="{ color: pal_blue }">{{ fmtNum(historyStats.prompt) }}</span>
             </div>
+            <div class="stat-cell">
+              <span class="stat-k">Predicted tokens</span>
+              <span class="stat-v" :style="{ color: pal_green }">{{ fmtNum(historyStats.predicted) }}</span>
+            </div>
+            <div class="stat-cell">
+              <span class="stat-k">Avg generation</span>
+              <span class="stat-v">{{ historyStats.tokPerSec.toFixed(1) }}<small>tok/s</small></span>
+            </div>
+          </div>
+          <div ref="historyChart" class="history-chart"></div>
+          <div class="table-wrap">
+            <table class="history-table">
+              <thead>
+                <tr>
+                  <th @click="sortHistory('model')">
+                    Model <span v-if="historySort.key==='model'" class="sort-arrow">{{ historySort.asc ? '▲' : '▼' }}</span>
+                  </th>
+                  <th @click="sortHistory('request_time')">
+                    Request time <span v-if="historySort.key==='request_time'" class="sort-arrow">{{ historySort.asc ? '▲' : '▼' }}</span>
+                  </th>
+                  <th @click="sortHistory('response_time')">
+                    Responded time <span v-if="historySort.key==='response_time'" class="sort-arrow">{{ historySort.asc ? '▲' : '▼' }}</span>
+                  </th>
+                  <th @click="sortHistory('duration')">
+                    Duration <span v-if="historySort.key==='duration'" class="sort-arrow">{{ historySort.asc ? '▲' : '▼' }}</span>
+                  </th>
+                  <th @click="sortHistory('prompt_n')">
+                    Prompt <span v-if="historySort.key==='prompt_n'" class="sort-arrow">{{ historySort.asc ? '▲' : '▼' }}</span>
+                  </th>
+                  <th @click="sortHistory('predicted_n')">
+                    Predicted <span v-if="historySort.key==='predicted_n'" class="sort-arrow">{{ historySort.asc ? '▲' : '▼' }}</span>
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="h in sortedHistory" :key="h.id"
+                  :style="{ borderLeft: '3px solid ' + modelColor(h.model) }">
+                  <td class="mono model-cell" :style="{ color: modelColor(h.model) }">{{ h.model }}</td>
+                  <td class="time-cell">{{ formatTime(h.request_time) }}</td>
+                  <td class="time-cell">{{ formatTime(h.response_time) }}</td>
+                  <td class="mono time-cell">{{ (h.response_time - h.request_time).toFixed(1) }}s</td>
+                  <td class="mono">{{ h.prompt_n.toLocaleString() }}</td>
+                  <td class="mono">{{ h.predicted_n.toLocaleString() }}</td>
+                </tr>
+                <tr v-if="history.length === 0">
+                  <td colspan="6" class="empty">No requests recorded</td>
+                </tr>
+              </tbody>
+            </table>
           </div>
         </div>
       </div>
     </div>
   </div>
 
-  <script>
-    // Color palette for model color-coding (cycles through the seasonal palette's
-    // named hues). All keys exist in every theme/variant (see theme.js).
-    const MODEL_COLOR_KEYS = ['blue', 'green', 'mauve', 'peach', 'teal', 'pink', 'sapphire', 'yellow', 'lavender', 'flamingo', 'sky', 'maroon', 'rosewater', 'red'];
-
-    const T = window.LRTheme;
-    const { createApp, ref, reactive, computed, onMounted, onUnmounted, nextTick } = Vue;
-
-    createApp({
-      setup() {
-        // "Aa" appearance popover state (mirrors LRTheme.state for active-highlighting)
-        const ui = reactive({ ...T.state });
-        const themeNames = T.themeNames;
-        const modeOptions = [{ value: 'light', label: 'Light' }, { value: 'dark', label: 'Dark' }, { value: 'system', label: 'Auto' }];
-        const sizeOptions = [{ value: 'small', label: 'S' }, { value: 'medium', label: 'M' }, { value: 'large', label: 'L' }, { value: 'xlarge', label: 'XL' }];
-        /**
-         * Builds the diagonal light/dark accent gradient shown on a palette swatch.
-         *
-         * @param {string} name  - the theme name whose accents to preview
-         * @returns {object} an inline-style object with the gradient background
-         */
-        const swatchStyle = (name) => {
-          const t = T.THEMES[name];
-          return { background: `linear-gradient(135deg, ${t.light.primary} 50%, ${t.dark.primary} 50%)` };
-        };
-
-        /**
-         * Applies a palette selection and mirrors it into `ui` for highlighting.
-         *
-         * @param {string} n  - the theme name to activate
-         * @returns {void}
-         */
-        const selectTheme = (n) => { T.setTheme(n); ui.theme = T.state.theme; };
-
-        /**
-         * Applies a variant-mode selection and mirrors it into `ui`.
-         *
-         * @param {'light'|'dark'|'system'} m  - the variant mode to activate
-         * @returns {void}
-         */
-        const selectVariant = (m) => { T.setVariant(m); ui.variantMode = T.state.variantMode; };
-
-        /**
-         * Applies a text-size selection and mirrors it into `ui`.
-         *
-         * @param {string} s  - the font-size key to activate
-         * @returns {void}
-         */
-        const selectFontSize = (s) => { T.setFontSize(s); ui.fontSize = T.state.fontSize; };
-
-        const routerStatus = ref('unknown');
-        const routerPorts = ref([]);
-        const numGpus = ref(0);          // total physical GPUs, from /router
-        const routerLoading = ref(null); // 'start' | 'stop' | 'restart' | null
-        const models = ref([]);
-        const gpus = ref([]);            // [{ index, name, total_vram_mb, util_history, vram_history }]
-        const selectedGpu = ref(0);      // index of the GPU shown in the util/VRAM charts
-        const history = ref([]);
-        const historyModel = ref('');
-        const historySort = ref({ key: 'request_time', asc: false });
-        const historyChartMode = ref('static');
-        const loadingModels = reactive({});
-
-        // Time windows for the history view. `sec` is how far back to load; null
-        // means the whole DB. The chart's zoom slider refines within the window.
-        const RANGES = [
-          { key: '1h', label: '1H', sec: 3600 },
-          { key: '6h', label: '6H', sec: 21600 },
-          { key: '24h', label: '24H', sec: 86400 },
-          { key: '7d', label: '7D', sec: 604800 },
-          { key: '30d', label: '30D', sec: 2592000 },
-          { key: 'all', label: 'All', sec: null },
-        ];
-        const historyRange = ref('24h');
-
-        const gpuUtilChart = ref(null);
-        const gpuVramChart = ref(null);
-        const statusChart = ref(null);
-        const historyChart = ref(null);
-
-        let utilChart = null, vramChart = null, stsChart = null, hstChart = null;
-        let pollTimer = null;
-
-        // Track model IDs to assign stable colors
-        const modelColorMap = reactive({});
-        let modelColorIdx = 0;
-
-        // Active seasonal palette; recomputed live so chart rebuilds pick up theme changes.
-        const pal = () => T.colors();
-        // Bumped on every theme/variant change so palette-derived computeds re-run.
-        const paletteTick = ref(0);
-        const pal_blue = computed(() => (paletteTick.value, pal().blue));
-        const pal_green = computed(() => (paletteTick.value, pal().green));
-
-        /**
-         * Aggregates the loaded history window into headline numbers.
-         *
-         * Averages per-request generation speed (predicted tokens / duration)
-         * only over requests that actually produced tokens, so idle/empty rows
-         * don't skew it.
-         *
-         * @returns {{reqs:number, prompt:number, predicted:number, tokPerSec:number}}
-         */
-        const historyStats = computed(() => {
-          const h = history.value;
-          let prompt = 0, predicted = 0, speedSum = 0, speedN = 0;
-          for (const x of h) {
-            prompt += x.prompt_n;
-            predicted += x.predicted_n;
-            const dur = x.response_time - x.request_time;
-            if (dur > 0 && x.predicted_n > 0) { speedSum += x.predicted_n / dur; speedN++; }
-          }
-          return { reqs: h.length, prompt, predicted, tokPerSec: speedN ? speedSum / speedN : 0 };
-        });
-        const statusColors = () => {
-          const p = T.colors();
-          return {
-            idle: p.blue, serving: p.green, swapping: p.mauve, starting: p.yellow,
-            stopping: p.peach, inactive: p.surface2, error: p.red,
-          };
-        };
-
-        // The GPU whose history feeds the util/VRAM charts (falls back to the first).
-        const currentGpu = () => gpus.value.find(g => g.index === selectedGpu.value) || gpus.value[0] || null;
-        const selectedGpuName = computed(() => {
-          const g = currentGpu();
-          return g ? g.name : 'No GPU';
-        });
-
-        /**
-         * Selects which GPU the util/VRAM charts display and redraws them.
-         *
-         * @param {number} idx  - the GPU index to show
-         * @returns {void}
-         */
-        function selectGpu(idx) {
-          selectedGpu.value = idx;
-          updateGpuCharts();
-        }
-
-        function modelColor(modelId) {
-          if (!modelColorMap[modelId]) {
-            const key = MODEL_COLOR_KEYS[modelColorIdx % MODEL_COLOR_KEYS.length];
-            modelColorIdx++;
-            modelColorMap[modelId] = key;
-          }
-          return pal()[modelColorMap[modelId]];
-        }
-
-        // Palette keys cycled by physical GPU index so each GPU keeps one stable
-        // color across every model row (GPU 0 is always the first key, etc.).
-        const GPU_COLOR_KEYS = ['sky', 'peach', 'green', 'mauve', 'yellow', 'teal', 'pink', 'flamingo', 'blue', 'lavender'];
-
-        /**
-         * Resolves the palette color for a physical GPU index.
-         *
-         * The mapping is deterministic (index → fixed palette key), so a given
-         * GPU is drawn in the same color everywhere it appears.
-         *
-         * @param {number} idx  - the physical GPU index
-         * @returns {string} a hex color from the active seasonal palette
-         */
-        function gpuColor(idx) {
-          return pal()[GPU_COLOR_KEYS[idx % GPU_COLOR_KEYS.length]];
-        }
-
-        // Matches a bare param-count segment (e.g. "20B", "6.5b") and an MoE
-        // active-param segment (e.g. "a3b", "A5B"). The first param/active
-        // segment marks where the model name ends and the tag list begins.
-        const PARAM_RE = /^\d+(?:\.\d+)?[bB]$/;
-        const ACTIVE_RE = /^[aA]\d+(?:\.\d+)?[bB]$/;
-
-        /**
-         * Splits a model id into a display name and a list of typed tags.
-         *
-         * The id is split on '-'; the first segment that is a param count
-         * (`20B`) or an MoE active-param count (`a3b`) begins the tag list, and
-         * everything before it is the name. Each tag is typed 'param', 'active',
-         * or 'plain' so the row can color the counts and neutralize descriptors.
-         * If no param segment is found the whole id is the name (no tags).
-         *
-         * @param {string} id  - the model id, e.g. "gemma-4-26b-a4b-uncensored"
-         * @returns {{name: string, tags: {text: string, kind: string}[]}}
-         */
-        function parseModel(id) {
-          const parts = String(id).split('-');
-          let idx = -1;
-          for (let i = 0; i < parts.length; i++) {
-            if (PARAM_RE.test(parts[i]) || ACTIVE_RE.test(parts[i])) { idx = i; break; }
-          }
-          if (idx === -1) return { name: id, tags: [] };
-          const name = parts.slice(0, idx).join('-') || id;
-          const tags = parts.slice(idx).map(t => ({
-            text: t,
-            kind: PARAM_RE.test(t) ? 'param' : ACTIVE_RE.test(t) ? 'active' : 'plain',
-          }));
-          return { name, tags };
-        }
-
-        /**
-         * Builds the per-GPU dot descriptors for one model row.
-         *
-         * Emits one entry per physical GPU (falling back to the model's own span
-         * when the total count is unknown), flagging which GPUs the model is
-         * pinned to so the row can light those and dim the rest.
-         *
-         * @param {{gpus: number[]}} m  - the model, with its assigned GPU list
-         * @returns {{idx: number, assigned: boolean, color: string}[]}
-         */
-        function gpuDots(m) {
-          const assigned = new Set(m.gpus || []);
-          const total = numGpus.value || gpuLegend.value.length ||
-            ((m.gpus && m.gpus.length) ? Math.max(...m.gpus) + 1 : 0);
-          const out = [];
-          for (let g = 0; g < total; g++) {
-            out.push({ idx: g, assigned: assigned.has(g), color: gpuColor(g) });
-          }
-          return out;
-        }
-
-        /**
-         * Inline style for a single GPU dot given its assignment + load state.
-         *
-         * Assigned GPUs draw in their GPU color — solid when the model is loaded,
-         * a hollow ring when it isn't; unassigned GPUs render as a faint ring.
-         *
-         * @param {{assigned: boolean, color: string}} d  - the dot descriptor
-         * @param {boolean} loaded  - whether the model is currently loaded
-         * @returns {object} an inline-style object
-         */
-        function dotStyle(d, loaded) {
-          if (!d.assigned) return { background: 'transparent', border: '1px solid ' + pal().surface2, opacity: 0.35 };
-          if (loaded) return { background: d.color, border: '1px solid ' + d.color };
-          return { background: 'transparent', border: '1.5px solid ' + d.color, opacity: 0.7 };
-        }
-
-        /**
-         * Inline style for a parsed name tag, colored by its kind.
-         *
-         * Param and active-param counts get a tinted, outlined chip in a fixed
-         * palette hue; plain descriptor tags stay neutral on the surface color.
-         *
-         * @param {{kind: string}} t  - the tag descriptor
-         * @returns {object} an inline-style object
-         */
-        function tagStyle(t) {
-          const p = pal();
-          if (t.kind === 'param') return { color: p.blue, borderColor: p.blue, background: p.blue + '1f' };
-          if (t.kind === 'active') return { color: p.mauve, borderColor: p.mauve, background: p.mauve + '1f' };
-          return { color: p.subtext0, borderColor: 'transparent', background: p.surface1 };
-        }
-
-        // GPU indices shown in the Models-header color key: every physical GPU
-        // when the count is known, else the union of GPUs any model is pinned to.
-        const gpuLegend = computed(() => {
-          paletteTick.value; // re-run on theme change so swatch colors refresh
-          if (numGpus.value > 0) return Array.from({ length: numGpus.value }, (_, i) => i);
-          const s = new Set();
-          for (const m of models.value) for (const g of (m.gpus || [])) s.add(g);
-          return [...s].sort((a, b) => a - b);
-        });
-
-        const statusColor = computed(() => {
-          const map = {
-            idle: 'badge-info', serving: 'badge-success', swapping: 'badge-secondary',
-            starting: 'badge-warning', stopping: 'badge-warning', inactive: 'badge-ghost',
-            error: 'badge-error',
-          };
-          return map[routerStatus.value] || 'badge-ghost';
-        });
-
-        const statusDotClass = computed(() => {
-          const map = {
-            idle: 'bg-info', serving: 'bg-success animate-pulse', swapping: 'bg-secondary animate-pulse',
-            starting: 'bg-warning animate-pulse', stopping: 'bg-warning', inactive: 'bg-base-content/20',
-            error: 'bg-error animate-pulse',
-          };
-          return map[routerStatus.value] || 'bg-base-content/20';
-        });
-
-        const sortedHistory = computed(() => {
-          const arr = [...history.value];
-          const { key, asc } = historySort.value;
-          arr.sort((a, b) => {
-            let va, vb;
-            if (key === 'duration') {
-              va = a.response_time - a.request_time;
-              vb = b.response_time - b.request_time;
-            } else {
-              va = a[key];
-              vb = b[key];
-            }
-            if (typeof va === 'string') return asc ? va.localeCompare(vb) : vb.localeCompare(va);
-            return asc ? va - vb : vb - va;
-          });
-          return arr.slice(0, 100); // keep the DOM table light
-        });
-
-        function formatTime(ts) {
-          const d = new Date(ts * 1000);
-          return d.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' });
-        }
-
-        // Compact axis numbers: 1234 -> 1.2k, 2500000 -> 2.5M
-        function fmtNum(v) {
-          const a = Math.abs(v);
-          if (a >= 1e9) return (v / 1e9).toFixed(a >= 1e10 ? 0 : 1) + 'B';
-          if (a >= 1e6) return (v / 1e6).toFixed(a >= 1e7 ? 0 : 1) + 'M';
-          if (a >= 1e3) return (v / 1e3).toFixed(a >= 1e4 ? 0 : 1) + 'k';
-          return String(v);
-        }
-
-        // --- Data fetching ---
-        async function fetchStatus() {
-          try {
-            const data = await (await fetch('/router')).json();
-            routerStatus.value = data.status;
-            routerPorts.value = data.ports || [];
-            if (data.num_gpus) numGpus.value = data.num_gpus;
-          } catch {}
-        }
-
-        async function fetchModels() {
-          try {
-            const data = await (await fetch('/router/models')).json();
-            const list = data.data || data.models || [];
-            models.value = list.map(m => {
-              const parsed = parseModel(m.id);
-              return {
-                id: m.id,
-                displayName: parsed.name,
-                // param/active counts ride line 1 with the name; plain
-                // descriptors drop to line 2 with the GPU dots.
-                paramTags: parsed.tags.filter(t => t.kind !== 'plain'),
-                plainTags: parsed.tags.filter(t => t.kind === 'plain'),
-                loaded: m.status?.value === 'loaded',
-                args: m.status?.args || [],
-                gpus: m.gpus || [],
-                loading: !!loadingModels[m.id],
-              };
-            });
-            // Pre-assign colors for all models
-            for (const m of models.value) {
-              modelColor(m.id);
-            }
-          } catch {}
-        }
-
-        async function fetchHistory() {
-          try {
-            // Load only the selected window; cap rows so a huge DB can't stall.
-            const params = new URLSearchParams({ limit: '10000' });
-            if (historyModel.value) params.set('model', historyModel.value);
-            const r = RANGES.find(x => x.key === historyRange.value);
-            if (r && r.sec) params.set('since', String(Math.floor(Date.now() / 1000) - r.sec));
-            history.value = await (await fetch(`/router/history?${params}`)).json();
-            updateHistoryChart();
-          } catch {}
-        }
-
-        /**
-         * Switches the history time window and reloads that window.
-         *
-         * @param {string} key  - a RANGES key ('1h', '24h', 'all', ...)
-         * @returns {void}
-         */
-        function setHistoryRange(key) {
-          historyRange.value = key;
-          fetchHistory();
-        }
-
-        async function routerAction(action) {
-          routerLoading.value = action;
-          try { await fetch(`/router/${action}`); } catch {}
-          await fetchStatus();
-          await fetchModels();
-          routerLoading.value = null;
-        }
-
-        async function loadModel(modelId) {
-          loadingModels[modelId] = true;
-          const m = models.value.find(x => x.id === modelId);
-          if (m) m.loading = true;
-          try {
-            await fetch('/models/load', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ model: modelId }),
-            });
-          } catch {}
-          delete loadingModels[modelId];
-          await fetchModels();
-        }
-
-        async function unloadModel(modelId) {
-          loadingModels[modelId] = true;
-          const m = models.value.find(x => x.id === modelId);
-          if (m) m.loading = true;
-          try {
-            await fetch('/models/unload', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ model: modelId }),
-            });
-          } catch {}
-          delete loadingModels[modelId];
-          await fetchModels();
-        }
-
-        async function resetHistory() {
-          await fetch('/router/reset_history');
-          await fetchHistory();
-        }
-
-        function sortHistory(key) {
-          if (historySort.value.key === key) {
-            historySort.value.asc = !historySort.value.asc;
-          } else {
-            historySort.value = { key, asc: true };
-          }
-        }
-
-        // --- Charts ---
-        function baseOpts() {
-          const p = pal();
-          return {
-            animation: false,
-            textStyle: { color: p.subtext0, fontFamily: 'ui-monospace, monospace', fontSize: 10 },
-            grid: { top: 8, right: 12, bottom: 28, left: 8, containLabel: true },
-            tooltip: {
-              backgroundColor: p.surface0, borderColor: p.surface1, borderWidth: 1,
-              textStyle: { color: p.text, fontSize: 11 },
-            },
-            xAxis: {
-              type: 'time',
-              axisLine: { lineStyle: { color: p.surface1 } },
-              axisTick: { show: false },
-              axisLabel: { color: p.overlay0, fontSize: 9, formatter: '{HH}:{mm}' },
-              splitLine: { show: false },
-            },
-          };
-        }
-
-        function areaGradient(color, topAlpha, botAlpha) {
-          return new echarts.graphic.LinearGradient(0, 0, 0, 1, [
-            { offset: 0, color: color + topAlpha },
-            { offset: 1, color: color + botAlpha },
-          ]);
-        }
-
-        function initCharts() {
-          utilChart = echarts.init(gpuUtilChart.value, null, { renderer: 'canvas' });
-          vramChart = echarts.init(gpuVramChart.value, null, { renderer: 'canvas' });
-          stsChart  = echarts.init(statusChart.value,  null, { renderer: 'canvas' });
-          hstChart  = echarts.init(historyChart.value,  null, { renderer: 'canvas' });
-          updateGpuCharts();
-          updateStatusChart({ entries: {} });
-          updateHistoryChart();
-        }
-
-        function rebuildCharts() {
-          [utilChart, vramChart, stsChart, hstChart].forEach(c => c?.dispose());
-          nextTick(async () => {
-            initCharts();
-            await Promise.all([fetchGpu(), fetchTimeline(), fetchHistory()]);
-          });
-        }
-
-        async function fetchGpu() {
-          try {
-            const data = await (await fetch('/router/gpu')).json();
-            gpus.value = data.gpus || [];
-            // Keep the selection valid as GPUs appear/disappear.
-            if (!gpus.value.some(g => g.index === selectedGpu.value)) {
-              selectedGpu.value = gpus.value.length ? gpus.value[0].index : 0;
-            }
-            updateGpuCharts();
-          } catch {}
-        }
-
-        async function fetchTimeline() {
-          try {
-            const data = await (await fetch('/router/status_timeline')).json();
-            updateStatusChart(data);
-          } catch {}
-        }
-
-        // Redraws the util + VRAM charts for the currently selected GPU.
-        function updateGpuCharts() {
-          if (!utilChart || !vramChart) return;
-          const p = pal();
-          const gpu = currentGpu();
-          const utilHistory = gpu ? gpu.util_history : [];
-          const vramHistory = gpu ? gpu.vram_history : [];
-
-          utilChart.setOption({
-            ...baseOpts(),
-            tooltip: { ...baseOpts().tooltip, trigger: 'axis',
-              formatter: params => `${new Date(params[0].value[0]).toLocaleTimeString()}<br/>GPU: ${params[0].value[1]}%` },
-            yAxis: {
-              type: 'value', min: 0, max: 100,
-              axisLabel: { color: p.overlay0, fontSize: 9, formatter: '{value}%' },
-              splitLine: { lineStyle: { color: p.surface0, type: 'dashed' } },
-              axisLine: { show: false }, axisTick: { show: false },
-            },
-            series: [{
-              type: 'line', showSymbol: false, smooth: 0.3, lineStyle: { color: p.blue, width: 1.5 },
-              areaStyle: { color: areaGradient(p.blue, '30', '05') },
-              data: utilHistory.map(([t, v]) => [t * 1000, v]),
-            }],
-          });
-
-          const totalVram = (gpu && gpu.total_vram_mb) || 1;
-          vramChart.setOption({
-            ...baseOpts(),
-            tooltip: { ...baseOpts().tooltip, trigger: 'axis',
-              formatter: params => {
-                const v = params[0].value[1];
-                return `${new Date(params[0].value[0]).toLocaleTimeString()}<br/>VRAM: ${(v/1024).toFixed(1)} GB / ${(totalVram/1024).toFixed(1)} GB`;
-              }},
-            yAxis: {
-              type: 'value', min: 0, max: Math.ceil(totalVram),
-              axisLabel: { color: p.overlay0, fontSize: 9, formatter: v => `${(v/1024).toFixed(0)}G` },
-              splitLine: { lineStyle: { color: p.surface0, type: 'dashed' } },
-              axisLine: { show: false }, axisTick: { show: false },
-            },
-            series: [{
-              type: 'line', showSymbol: false, smooth: 0.3, lineStyle: { color: p.teal, width: 1.5 },
-              areaStyle: { color: areaGradient(p.teal, '30', '05') },
-              data: vramHistory.map(([t, v]) => [t * 1000, v]),
-              markLine: {
-                silent: true, symbol: 'none',
-                data: [{ yAxis: totalVram, lineStyle: { color: p.red, type: 'dashed', width: 1, opacity: 0.5 } }],
-                label: { show: false },
-              },
-            }],
-          });
-        }
-
-        /**
-         * Renders the per-GPU status timeline: one horizontal lane per GPU.
-         *
-         * The server sends { entries: { "<gpu>": [[ts, status], ...] } }; each
-         * GPU becomes a category lane, and consecutive entries in a lane are
-         * drawn as colored segments spanning to the next entry (or now).
-         *
-         * @param {object} data  - the /router/status_timeline payload
-         * @returns {void}
-         */
-        function updateStatusChart(data) {
-          if (!stsChart) return;
-          const p = pal();
-          const sc = statusColors();
-          const byGpu = data.entries || {};
-          // Numeric GPU indices, ascending; fall back to the live GPU list so an
-          // empty timeline still shows a labeled lane per known GPU.
-          let gpuIdx = Object.keys(byGpu).map(Number).sort((a, b) => a - b);
-          if (!gpuIdx.length) gpuIdx = gpus.value.map(g => g.index).sort((a, b) => a - b);
-          if (!gpuIdx.length) gpuIdx = [0];
-          const now = Date.now();
-          const segments = [];
-          gpuIdx.forEach((g, lane) => {
-            const entries = byGpu[g] || byGpu[String(g)] || [];
-            for (let i = 0; i < entries.length; i++) {
-              const [ts, status] = entries[i];
-              const start = ts * 1000;
-              const end = i + 1 < entries.length ? entries[i + 1][0] * 1000 : now;
-              segments.push({
-                value: [start, lane, end, status, g],
-                itemStyle: { color: sc[status] || p.surface1 },
-              });
-            }
-          });
-          const laneNames = gpuIdx.map(g => `GPU ${g}`);
-
-          stsChart.setOption({
-            animation: false,
-            textStyle: { color: p.subtext0, fontFamily: 'ui-monospace, monospace', fontSize: 10 },
-            grid: { top: 8, right: 12, bottom: 28, left: 52 },
-            xAxis: {
-              type: 'time',
-              axisLine: { lineStyle: { color: p.surface1 } },
-              axisTick: { show: false },
-              axisLabel: { color: p.overlay0, fontSize: 9, formatter: '{HH}:{mm}' },
-              splitLine: { show: false },
-            },
-            yAxis: {
-              type: 'category',
-              data: laneNames,
-              axisLine: { show: false },
-              axisTick: { show: false },
-              axisLabel: { color: p.overlay0, fontSize: 9 },
-              splitLine: { show: false },
-            },
-            tooltip: {
-              backgroundColor: p.surface0, borderColor: p.surface1, borderWidth: 1,
-              textStyle: { color: p.text, fontSize: 11 },
-              formatter: params => {
-                const d = params.data.value;
-                const s = new Date(d[0]).toLocaleTimeString();
-                const e = new Date(d[2]).toLocaleTimeString();
-                return `GPU ${d[4]}: <span style="color:${sc[d[3]] || p.text}">${d[3]}</span><br/>${s} — ${e}`;
-              },
-            },
-            series: [{
-              type: 'custom',
-              renderItem: (params, api) => {
-                const lane = api.value(1);
-                const start = api.coord([api.value(0), lane]);
-                const end = api.coord([api.value(2), lane]);
-                const h = Math.min(api.size([0, 1])[1] * 0.5, 14);
-                const r = Math.min(4, (end[0] - start[0]) / 2);
-                return {
-                  type: 'rect',
-                  shape: { x: start[0], y: start[1] - h / 2, width: Math.max(end[0] - start[0], 2), height: h, r },
-                  style: { fill: api.visual('color') },
-                };
-              },
-              encode: { x: [0, 2], y: 1 },
-              data: segments,
-            }],
-          });
-        }
-
-        /**
-         * Builds the shared time-axis config for the history chart.
-         *
-         * The axis label uses ECharts' hierarchical time formatter, so tick
-         * resolution follows the zoom: days show a date, hours/minutes show the
-         * clock, and a deep zoom exposes seconds — dates always present at day
-         * boundaries. min/max are pinned to the loaded window (so a sparse day
-         * still spans the full axis); 'All' lets the data define the extent.
-         *
-         * @param {object} p  - the active palette
-         * @returns {object} an ECharts xAxis config
-         */
-        function historyTimeAxis(p) {
-          const r = RANGES.find(x => x.key === historyRange.value);
-          const now = Date.now();
-          const min = (r && r.sec) ? now - r.sec * 1000 : undefined;
-          const max = (r && r.sec) ? now : undefined;
-          return {
-            type: 'time', min, max,
-            axisLine: { lineStyle: { color: p.surface1 } },
-            axisTick: { show: false },
-            axisLabel: {
-              color: p.overlay0, fontSize: 9, hideOverlap: true,
-              formatter: {
-                year: '{yyyy}', month: '{MMM}', day: '{MMM} {d}',
-                hour: '{HH}:{mm}', minute: '{HH}:{mm}', second: '{HH}:{mm}:{ss}',
-                millisecond: '{HH}:{mm}:{ss}', none: '{yyyy}-{MM}-{dd}',
-              },
-            },
-            splitLine: { show: false },
-          };
-        }
-
-        /**
-         * Builds the zoom controls (scroll/drag + a styled bottom slider).
-         *
-         * filterMode 'none' zooms the axis without dropping points, so the axis
-         * gains resolution as you narrow in rather than thinning the series.
-         *
-         * @param {object} p  - the active palette
-         * @returns {object[]} an ECharts dataZoom config array
-         */
-        function historyZoom(p) {
-          return [
-            { type: 'inside', filterMode: 'none' },
-            {
-              type: 'slider', filterMode: 'none', height: 18, bottom: 26,
-              borderColor: 'transparent', backgroundColor: p.surface0 + '66',
-              fillerColor: p.blue + '22',
-              handleStyle: { color: p.blue, borderColor: p.blue },
-              moveHandleStyle: { color: p.surface1 },
-              dataBackground: { lineStyle: { color: p.surface1, width: 1 }, areaStyle: { color: p.surface0 } },
-              selectedDataBackground: { lineStyle: { color: p.blue, opacity: 0.6 }, areaStyle: { color: p.blue, opacity: 0.12 } },
-              textStyle: { color: p.overlay0, fontSize: 9 },
-              labelFormatter: (v) => {
-                const d = new Date(v);
-                return d.toLocaleDateString([], { month: 'short', day: 'numeric' }) + '\n' +
-                       d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-              },
-            },
-          ];
-        }
-
-        /**
-         * Rich, date-aware tooltip shared by both history modes.
-         *
-         * @param {object} p  - the active palette
-         * @returns {function} an ECharts axis-tooltip formatter
-         */
-        function historyTooltipFormatter(p) {
-          return (params) => {
-            if (!params || !params.length) return '';
-            const head = new Date(params[0].value[0]).toLocaleString([], {
-              month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit',
-            });
-            let body = '';
-            for (const s of params) {
-              body += `<div style="display:flex;justify-content:space-between;gap:16px">` +
-                      `<span>${s.marker}${s.seriesName}</span><b>${fmtNum(s.value[1])}</b></div>`;
-            }
-            return `<div style="opacity:.6;margin-bottom:3px">${head}</div>${body}`;
-          };
-        }
-
-        function updateHistoryChart() {
-          if (!hstChart) return;
-          const p = pal();
-          const h = history.value;
-
-          const common = {
-            animation: false,
-            textStyle: { color: p.subtext0, fontFamily: 'ui-monospace, monospace', fontSize: 10 },
-            grid: { top: 30, right: 16, bottom: 62, left: 8, containLabel: true },
-            legend: {
-              data: ['Prompt', 'Predicted'], top: 2, right: 4,
-              textStyle: { color: p.overlay0, fontSize: 10 },
-              icon: 'roundRect', itemWidth: 10, itemHeight: 6,
-            },
-            tooltip: {
-              trigger: 'axis',
-              backgroundColor: p.surface0, borderColor: p.surface1, borderWidth: 1,
-              textStyle: { color: p.text, fontSize: 11 },
-              axisPointer: { type: 'line', lineStyle: { color: p.overlay0, opacity: 0.35, type: 'dashed' } },
-              formatter: historyTooltipFormatter(p),
-            },
-            xAxis: historyTimeAxis(p),
-            yAxis: {
-              type: 'value',
-              axisLabel: { color: p.overlay0, fontSize: 9, formatter: fmtNum },
-              splitLine: { lineStyle: { color: p.surface0, type: 'dashed' } },
-              axisLine: { show: false }, axisTick: { show: false },
-            },
-            dataZoom: historyZoom(p),
-          };
-
-          if (historyChartMode.value === 'cumulative') {
-            const sorted = [...h].sort((a, b) => a.request_time - b.request_time);
-            let cumPrompt = 0, cumPredicted = 0;
-            const promptData = [], predictedData = [];
-            for (const item of sorted) {
-              cumPrompt += item.prompt_n;
-              cumPredicted += item.predicted_n;
-              const t = item.request_time * 1000;
-              promptData.push([t, cumPrompt]);
-              predictedData.push([t, cumPredicted]);
-            }
-            hstChart.setOption({
-              ...common,
-              series: [
-                {
-                  name: 'Prompt', type: 'line', stack: 'cumulative', showSymbol: false, smooth: 0.2,
-                  lineStyle: { color: p.blue, width: 1.5 },
-                  areaStyle: { color: areaGradient(p.blue, '35', '08') },
-                  data: promptData,
-                },
-                {
-                  name: 'Predicted', type: 'line', stack: 'cumulative', showSymbol: false, smooth: 0.2,
-                  lineStyle: { color: p.green, width: 1.5 },
-                  areaStyle: { color: areaGradient(p.green, '25', '05') },
-                  data: predictedData,
-                },
-              ],
-            }, true);
-          } else {
-            hstChart.setOption({
-              ...common,
-              series: [
-                {
-                  name: 'Prompt', type: 'bar', stack: 'tokens',
-                  itemStyle: { color: p.blue }, barMaxWidth: 20,
-                  data: h.map(x => [x.request_time * 1000, x.prompt_n]),
-                },
-                {
-                  name: 'Predicted', type: 'bar', stack: 'tokens',
-                  itemStyle: { color: p.green, borderRadius: [2, 2, 0, 0] }, barMaxWidth: 20,
-                  data: h.map(x => [x.request_time * 1000, x.predicted_n]),
-                },
-              ],
-            }, true);
-          }
-        }
-
-        // --- Polling ---
-        async function pollAll() {
-          await Promise.all([fetchStatus(), fetchModels(), fetchGpu(), fetchTimeline(), fetchHistory()]);
-        }
-
-        onMounted(async () => {
-          await nextTick();
-          initCharts();
-          await pollAll();
-          pollTimer = setInterval(pollAll, 5000);
-          window.addEventListener('resize', () => {
-            [utilChart, vramChart, stsChart, hstChart].forEach(c => c?.resize());
-          });
-          // Recolor charts + model swatches + stat cells when the palette changes.
-          T.onChange(() => { paletteTick.value++; rebuildCharts(); });
-        });
-
-        onUnmounted(() => {
-          clearInterval(pollTimer);
-          [utilChart, vramChart, stsChart, hstChart].forEach(c => c?.dispose());
-        });
-
-        return {
-          ui, themeNames, modeOptions, sizeOptions, swatchStyle, selectTheme, selectVariant, selectFontSize,
-          routerStatus, routerPorts, routerLoading, models, history, historyModel,
-          gpus, selectedGpu, selectedGpuName, selectGpu,
-          historySort, historyChartMode, statusColor, statusDotClass, sortedHistory,
-          ranges: RANGES, historyRange, setHistoryRange, historyStats,
-          pal_blue, pal_green, fmtStat: fmtNum,
-          formatTime, fetchHistory, routerAction, modelColor, gpuColor, gpuLegend,
-          gpuDots, dotStyle, tagStyle,
-          loadModel, unloadModel, resetHistory, sortHistory, updateHistoryChart,
-          gpuUtilChart, gpuVramChart, statusChart, historyChart,
-        };
-      },
-    }).mount('#app');
-  </script>
+  <script type="module" src="/dash/assets/js/app.js"></script>
 </body>
 </html>

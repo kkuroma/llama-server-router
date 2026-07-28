@@ -13,6 +13,10 @@ Run it:
 
     python frontend-demo/launch.py           # -> http://127.0.0.1:11500/dash
 
+Frontend edits under ../src (.html/.css/.js) auto-refresh any open demo page:
+served pages long-poll /__reload and reload when the watcher sees an mtime
+change. Only python edits (this file, mock_data.py) still need a rerun.
+
 Env knobs:
     DEMO_PORT   listen port                 (default 11500)
     DEMO_HOST   listen host                 (default 127.0.0.1)
@@ -400,6 +404,65 @@ def sim_loop():
         time.sleep(1.0)
 
 
+# --- live reload -----------------------------------------------------------
+# Frontend edits under ../src auto-refresh open pages: a watcher thread bumps a
+# version when any .html/.css/.js mtime changes, pages long-poll /__reload and
+# location.reload() when the version moves. The version starts at the launch
+# timestamp, so a script restart also differs from whatever clients last saw
+# and reconnecting pages refresh themselves.
+
+RELOAD_EXTS = (".html", ".css", ".js")
+RELOAD_POLL = 0.5      # seconds between mtime scans
+RELOAD_HOLD = 30.0     # max seconds a /__reload long-poll is held
+
+_reload_cond = threading.Condition()
+_reload_version = int(time.time())
+
+
+def _frontend_state():
+    """Snapshot of every frontend file's mtime under ../src."""
+    return {
+        str(p): p.stat().st_mtime
+        for p in SRC.rglob("*")
+        if p.suffix in RELOAD_EXTS and p.is_file()
+    }
+
+
+def watch_loop():
+    """Bumps the reload version whenever a frontend file changes on disk."""
+    global _reload_version
+    state = _frontend_state()
+    while True:
+        time.sleep(RELOAD_POLL)
+        try:
+            now = _frontend_state()
+        except OSError:
+            continue  # a file vanished mid-scan (editor atomic save); retry
+        if now != state:
+            state = now
+            with _reload_cond:
+                _reload_version += 1
+                _reload_cond.notify_all()
+
+
+RELOAD_SCRIPT = """<script>
+(function () {
+  var v = null;
+  function poll() {
+    fetch('/__reload' + (v === null ? '' : '?v=' + v))
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (v !== null && d.version !== v) { location.reload(); return; }
+        v = d.version;
+        poll();
+      })
+      .catch(function () { setTimeout(poll, 1000); });
+  }
+  poll();
+})();
+</script>"""
+
+
 # Minimal placeholder served for the /chat iframe (there is no real llama.cpp UI
 # behind these ports in the demo). Keeps the tab structure/embedding exercised.
 INSTANCE_PAGE = """<!doctype html><html><head><meta charset=utf-8>
@@ -459,11 +522,17 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _spa(self, page: str):
-        """Serves one of the real SPA index.html files from ../src."""
+        """Serves one of the real SPA index.html files from ../src, with the
+        live-reload client injected."""
         html = SRC / page / "index.html"
         if not html.exists():
             return self._json({"error": f"{page} not found"}, 404)
-        return self._html(html.read_text())
+        text = html.read_text()
+        if "</body>" in text:
+            text = text.replace("</body>", RELOAD_SCRIPT + "\n</body>", 1)
+        else:
+            text += RELOAD_SCRIPT
+        return self._html(text)
 
     # --- routing -----------------------------------------------------------
 
@@ -477,10 +546,21 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Location", "/dash")
             self.end_headers()
             return
+        if p == "/__reload":
+            # Immediate answer when the client's version is stale or absent;
+            # otherwise hold until a change (or the poll timeout) and re-answer.
+            want = q.get("v", [None])[0]
+            with _reload_cond:
+                if want == str(_reload_version):
+                    _reload_cond.wait(RELOAD_HOLD)
+                version = _reload_version
+            return self._json({"version": version})
         if p in ("/dash", "/chat", "/translate"):
             return self._spa(p.lstrip("/"))
         if p.startswith("/webui/"):
             return self._file(SRC / "webui" / p[len("/webui/"):])
+        if p.startswith("/dash/assets/"):
+            return self._file(SRC / "dash" / "assets" / p[len("/dash/assets/"):])
 
         # --- router API ---
         if p == "/router":
@@ -589,8 +669,10 @@ def _f(v):
 def main():
     """Starts the sim thread and serves the demo until interrupted."""
     threading.Thread(target=sim_loop, daemon=True).start()
+    threading.Thread(target=watch_loop, daemon=True).start()
     httpd = ThreadingHTTPServer((HOST, PORT), Handler)
     print(f"[demo] frontend demo on http://{HOST}:{PORT}/dash", flush=True)
+    print(f"[demo] live reload: watching {SRC} for {'/'.join(RELOAD_EXTS)}", flush=True)
     print(f"[demo] {len(MD.GPUS)} GPUs · {len(MD.MODELS)} models · auto={'on' if AUTO else 'off'}", flush=True)
     try:
         httpd.serve_forever()

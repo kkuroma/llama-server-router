@@ -1,0 +1,214 @@
+/* Dashboard page styles. theme.css supplies the palette vars + shared chrome
+   (navbar, cards, seg controls, Aa popover); everything else lives here.
+   On desktop the layout is locked to the viewport: the page never scrolls,
+   only the model list and the history table do. */
+
+*, *::before, *::after { box-sizing: border-box; }
+body, h1, h2, h3, p, ul { margin: 0; }
+svg { display: block; }
+
+html { height: 100%; }
+body {
+  height: 100%; overflow: hidden;
+  background: var(--base); color: var(--text);
+  scrollbar-color: var(--overlay0) transparent; /* firefox; webkit is in theme.css */
+}
+
+#app { height: 100%; display: flex; flex-direction: column; }
+.lr-navbar { flex-shrink: 0; }
+
+.dash-main {
+  flex: 1; min-height: 0; display: flex; gap: 1rem;
+  width: 100%; max-width: 1536px; margin: 0 auto; padding: 1rem;
+}
+
+/* --- columns --- */
+
+.col-side {
+  width: 320px; flex-shrink: 0; min-height: 0;
+  display: flex; flex-direction: column; gap: 1rem;
+}
+.col-charts {
+  flex: 1; min-width: 0; min-height: 0;
+  display: flex; flex-direction: column; gap: 1rem;
+}
+
+/* --- cards --- */
+
+.card {
+  padding: 1rem; min-height: 0;
+  display: flex; flex-direction: column; gap: 0.7rem;
+}
+.card .seg { margin: 0; }
+.card-head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 0.5rem; flex-wrap: wrap; flex-shrink: 0;
+}
+.panel-title {
+  font-size: 0.72rem; font-weight: 600; text-transform: uppercase;
+  letter-spacing: 0.06em; opacity: 0.6;
+}
+.row { display: flex; align-items: center; gap: 0.5rem; min-width: 0; }
+.dim { opacity: 0.5; }
+.empty { font-size: 0.75rem; opacity: 0.4; text-align: center; padding: 0.75rem 0; }
+
+/* --- navbar status --- */
+
+.brand-status { display: flex; align-items: center; gap: 0.35rem; font-size: 0.8rem; }
+.status-name { opacity: 0.7; }
+.nav-right { display: flex; align-items: center; gap: 0.5rem; }
+.status-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.status-text { font-size: 0.85rem; }
+.pulse { animation: pulse 1.6s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: 0.35; } }
+
+/* --- router controls --- */
+
+.ports { font-size: 0.72rem; opacity: 0.5; }
+.btn-row { display: flex; gap: 0.5rem; }
+.action-btn {
+  flex: 1; display: inline-flex; align-items: center; justify-content: center;
+  padding: 0.32rem 0.6rem; font: inherit; font-size: 0.8rem; font-weight: 600;
+  color: var(--accent); border: 1px solid var(--accent); border-radius: 0.5rem;
+  background: transparent; cursor: pointer; transition: background-color 0.15s;
+}
+.action-btn:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 14%, transparent); }
+.action-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+.action-btn.green { --accent: var(--green); }
+.action-btn.red { --accent: var(--red); }
+.action-btn.yellow { --accent: var(--yellow); }
+
+.spinner {
+  width: 12px; height: 12px; flex-shrink: 0; display: inline-block;
+  border: 2px solid currentColor; border-right-color: transparent;
+  border-radius: 50%; animation: spin 0.6s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* --- model list --- */
+
+.models-card { flex: 1; }
+.model-list {
+  flex: 1; min-height: 0; overflow-y: auto; scrollbar-width: none;
+  display: flex; flex-direction: column; gap: 0.5rem;
+}
+.model-list::-webkit-scrollbar { display: none; }
+.gpu-legend { display: flex; align-items: center; gap: 0.25rem; font-size: 0.6rem; font-weight: 600; }
+.legend-label { text-transform: uppercase; letter-spacing: 0.05em; opacity: 0.4; }
+
+/* Left stripe doubles as the load indicator: model color when loaded, grey
+   when not. The same model color keys the name, the load button, and the
+   history table rows. */
+.model-row {
+  flex-shrink: 0; display: flex; align-items: stretch; gap: 0.5rem;
+  padding: 0.4rem 0.5rem; border-radius: 0.65rem; border-left: 3px solid transparent;
+  background: color-mix(in srgb, var(--base) 85%, transparent);
+}
+.model-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 0.25rem; }
+.model-line { display: flex; align-items: center; gap: 0.4rem; min-width: 0; }
+.model-line.wrap { flex-wrap: wrap; }
+.model-name { font-size: 0.75rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gpu-group { display: inline-flex; align-items: center; gap: 0.25rem; flex-shrink: 0; }
+.gpu-label { font-size: 0.55rem; text-transform: uppercase; letter-spacing: 0.05em; opacity: 0.4; }
+
+/* One digit per physical GPU: its GPU color when the model is pinned to it,
+   grey when not. */
+.gpu-num { font-size: 0.62rem; font-weight: 600; line-height: 1; }
+
+/* Parsed name tags: param/active-param counts (colored) + descriptors (neutral). */
+.model-tag {
+  font-family: 'Maple Mono', ui-monospace, monospace; font-size: 0.55rem; line-height: 1.1;
+  padding: 1px 4px; border-radius: 3px; border: 1px solid transparent;
+  white-space: nowrap; flex-shrink: 0;
+}
+
+.row-btn {
+  align-self: center; flex-shrink: 0; display: inline-flex; align-items: center;
+  padding: 0.25rem 0.6rem; font: inherit; font-size: 0.7rem; font-weight: 600;
+  border: 1px solid var(--surface2); border-radius: 0.5rem;
+  background: transparent; color: var(--text); cursor: pointer;
+}
+.row-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* --- charts --- */
+
+.charts-row { display: grid; grid-template-columns: 2fr 1fr; gap: 1rem; flex-shrink: 0; }
+/* Both GPU grids + their shared zoom slider live in this one echarts instance. */
+.gpu-chart { width: 100%; height: clamp(150px, 24vh, 260px); }
+/* Status timeline fills its card so its bottom axis lines up with the GPU charts. */
+.chart-fill { flex: 1; min-height: 120px; }
+
+/* --- request history --- */
+
+.history-card { flex: 1; }
+.history-controls { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+/* Compact the control row to the select's height. */
+.history-controls .seg-btn { padding: 0.16rem 0.5rem; font-size: 0.72rem; }
+
+/* Squared segmented group (the seg pill's squircle sibling, for the history
+   range/mode toggles that were daisyUI joins originally). */
+.btn-group {
+  display: flex; border: 1px solid var(--surface2);
+  border-radius: 0.5rem; overflow: hidden;
+}
+.btn-group .seg-btn { border-radius: 0; }
+.history-chart { width: 100%; height: clamp(150px, 24vh, 300px); flex-shrink: 0; }
+
+.model-select {
+  font: inherit; font-size: 0.72rem; width: 160px;
+  padding: 0.22rem 0.6rem; border-radius: 0.5rem;
+  background: var(--base); color: var(--text); border: 1px solid var(--surface2);
+}
+.icon-btn {
+  border: 0; background: none; color: var(--text); opacity: 0.5;
+  padding: 0.25rem; border-radius: 0.5rem; cursor: pointer;
+}
+.icon-btn:hover { opacity: 1; background: var(--surface0); }
+
+.stats-grid {
+  display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.5rem; flex-shrink: 0;
+}
+.stat-cell {
+  display: flex; flex-direction: column; gap: 0.1rem; min-width: 0;
+  padding: 0.4rem 0.7rem; border-radius: 0.6rem;
+  background: var(--surface0); border: 1px solid var(--surface1);
+}
+.stat-k { font-size: 0.62rem; text-transform: uppercase; letter-spacing: 0.05em; opacity: 0.55; }
+.stat-v {
+  font-family: 'Maple Mono', ui-monospace, monospace;
+  font-size: 1.05rem; font-weight: 600; line-height: 1.1;
+}
+.stat-v small { font-size: 0.62rem; font-weight: 500; opacity: 0.6; margin-left: 0.15rem; }
+
+.table-wrap { flex: 1; min-height: 0; overflow: auto; scrollbar-width: thin; }
+.history-table { width: 100%; border-collapse: collapse; font-size: 0.72rem; }
+.history-table th {
+  position: sticky; top: 0; z-index: 1; background: var(--mantle);
+  text-align: left; font-weight: 600; font-size: 0.68rem; color: var(--subtext0);
+  padding: 0.3rem 0.5rem; cursor: pointer; user-select: none; white-space: nowrap;
+}
+.history-table td {
+  padding: 0.28rem 0.5rem;
+  border-top: 1px solid color-mix(in srgb, var(--overlay0) 30%, transparent);
+}
+.history-table tbody tr:hover { background: var(--surface0); }
+.sort-arrow { opacity: 0.4; }
+.model-cell { max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.time-cell { opacity: 0.7; white-space: nowrap; }
+
+/* --- small screens: stack and let the page scroll --- */
+
+@media (max-width: 1023px) {
+  body { overflow: auto; }
+  #app { height: auto; min-height: 100%; }
+  .dash-main { flex-direction: column; }
+  .col-side { width: 100%; }
+  .model-list { max-height: 24rem; }
+  .table-wrap { max-height: 16rem; }
+  .charts-row { grid-template-columns: 1fr; }
+  .stats-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 640px) {
+  .gpu-split { grid-template-columns: 1fr; }
+}
