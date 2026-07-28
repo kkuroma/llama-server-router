@@ -140,15 +140,19 @@ export function renderGpu(chart, gpus) {
       backgroundColor: p.surface0, borderColor: p.surface1, borderWidth: 1,
       textStyle: { color: p.text, fontSize: 11 },
       formatter: params => {
-        if (!params || !params.length) return '';
-        const head = new Date(params[0].value[0]).toLocaleTimeString();
+        // The gap markers are [t, null] points; skip them or the tooltip
+        // throws mid-mousemove and wedges hovering entirely.
+        const live = (params || []).filter(s => s.value && s.value[1] != null);
+        if (!live.length) return '';
+        const head = new Date(live[0].value[0]).toLocaleTimeString();
         let body = '';
-        for (const s of params) {
+        for (const s of live) {
           const v = s.seriesIndex < utilCount
             ? `${s.value[1].toFixed(0)}%`
             : `${(s.value[1] / 1024).toFixed(1)} GB`;
+          const name = (gpus[s.seriesIndex % utilCount] || {}).name || '';
           body += `<div style="display:flex;justify-content:space-between;gap:16px">` +
-                  `<span>${s.marker}${s.seriesName}</span><b>${v}</b></div>`;
+                  `<span>${s.marker}${s.seriesName} <span style="opacity:.55">${name}</span></span><b>${v}</b></div>`;
         }
         return `<div style="opacity:.6;margin-bottom:3px">${head}</div>${body}`;
       },
@@ -211,7 +215,7 @@ export function renderStatus(chart, entries, fallbackLanes) {
   // Center the lane block vertically instead of stretching lanes across the
   // whole card: fixed height per lane, time labels right below the lanes.
   const chartH = chart.getHeight();
-  const plotH = Math.min(Math.max(chartH - 46, 40), gpuIdx.length * 30);
+  const plotH = Math.min(Math.max(chartH - 46, 40), gpuIdx.length * 48);
   const gridTop = Math.max(8, (chartH - plotH - 20) / 2);
 
   chart.setOption({
@@ -249,7 +253,7 @@ export function renderStatus(chart, entries, fallbackLanes) {
         const lane = api.value(1);
         const start = api.coord([api.value(0), lane]);
         const end = api.coord([api.value(2), lane]);
-        const h = Math.min(api.size([0, 1])[1] * 0.5, 14);
+        const h = Math.min(api.size([0, 1])[1] * 0.55, 24);
         return {
           type: 'rect',
           shape: { x: start[0], y: start[1] - h / 2, width: Math.max(end[0] - start[0], 2), height: h },

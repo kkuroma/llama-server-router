@@ -64,7 +64,11 @@ body {
 
 /* --- router controls --- */
 
-.ports { font-size: 0.72rem; opacity: 0.5; }
+/* Always one line tall so the card doesn't jump as ports come and go. */
+.ports {
+  font-size: 0.72rem; opacity: 0.5; min-height: 1.2em;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
 .btn-row { display: flex; gap: 0.5rem; }
 .action-btn {
   flex: 1; display: inline-flex; align-items: center; justify-content: center;
