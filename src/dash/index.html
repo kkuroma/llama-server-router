@@ -20,15 +20,17 @@
     .chart-container { width: 100%; height: 220px; }
     /* Request-history plot is taller to make room for the zoom slider + axis. */
     .history-chart { width: 100%; height: 300px; }
-    /* Model color dot stripe on model rows */
-    .model-row { border-left: 3px solid transparent; position: relative; }
-    /* GPU assignment underline: a thin bar along the row's bottom edge, colored
-       by the physical GPU(s) the model is pinned to (one solid color for a
-       single GPU, equal hard-stop segments for several). The header legend maps
-       each color back to its GPU number. */
-    .gpu-underline {
-      position: absolute; left: 0.5rem; right: 0.5rem; bottom: 0.15rem;
-      height: 2px; border-radius: 2px;
+    /* Model color stripe on model rows */
+    .model-row { border-left: 3px solid transparent; }
+    /* Per-GPU dot on a model row's second line: one per physical GPU, colored
+       for the GPUs the model is pinned to (solid when the model is loaded,
+       hollow outline when not) and faint for GPUs it never touches. */
+    .gpu-dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; box-sizing: border-box; }
+    /* Parsed name tags: param/active-param counts (colored) + plain descriptor
+       tags (neutral). Small, monospace, wrap to the right of the row. */
+    .model-tag {
+      font-family: ui-monospace, monospace; font-size: 0.55rem; line-height: 1.1;
+      padding: 1px 4px; border-radius: 3px; border: 1px solid transparent; white-space: nowrap;
     }
     /* Compact summary stat cell above the history chart. */
     .stat-cell {
@@ -149,26 +151,35 @@
             <div class="relative min-h-0 lg:flex-1">
               <div class="space-y-2 overflow-y-auto pr-1 max-h-96 lg:max-h-none lg:absolute lg:inset-0">
               <div v-for="m in models" :key="m.id"
-                class="model-row flex items-center justify-between p-2 rounded-lg bg-base-100/50"
+                class="model-row px-2 py-1.5 rounded-lg bg-base-100/50"
                 :style="{ borderLeftColor: modelColor(m.id) }">
-                <div class="flex items-center gap-2 min-w-0">
-                  <div class="w-2 h-2 rounded-full flex-shrink-0"
-                    :style="{ backgroundColor: m.loaded ? modelColor(m.id) : 'transparent', border: m.loaded ? 'none' : '1.5px solid ' + modelColor(m.id), opacity: m.loaded ? 1 : 0.4 }"></div>
-                  <span class="font-mono text-xs truncate" :title="m.id" :style="{ color: modelColor(m.id) }">{{ m.id }}</span>
+                <!-- Line 1: model name (left) + load/unload (right). -->
+                <div class="flex items-center justify-between gap-2 min-w-0">
+                  <span class="font-mono text-xs truncate" :title="m.id" :style="{ color: modelColor(m.id) }">{{ m.displayName }}</span>
+                  <button class="btn btn-xs flex-shrink-0"
+                    :style="m.loading ? {} : { borderColor: modelColor(m.id), color: modelColor(m.id), backgroundColor: 'transparent' }"
+                    :class="m.loading ? 'btn-disabled' : ''"
+                    @click="m.loaded ? unloadModel(m.id) : loadModel(m.id)"
+                    :disabled="m.loading">
+                    <span v-if="m.loading" class="loading loading-spinner loading-xs"></span>
+                    <span v-else class="text-xs">{{ m.loaded ? 'Unload' : 'Load' }}</span>
+                  </button>
                 </div>
-                <button class="btn btn-xs flex-shrink-0"
-                  :style="m.loading ? {} : { borderColor: modelColor(m.id), color: modelColor(m.id), backgroundColor: 'transparent' }"
-                  :class="m.loading ? 'btn-disabled' : ''"
-                  @click="m.loaded ? unloadModel(m.id) : loadModel(m.id)"
-                  :disabled="m.loading">
-                  <span v-if="m.loading" class="loading loading-spinner loading-xs"></span>
-                  <span v-else class="text-xs">{{ m.loaded ? 'Unload' : 'Load' }}</span>
-                </button>
-                <!-- GPU assignment (fixed placement from config.json): underline
-                     colored per physical GPU; header legend is the color key. -->
-                <div v-if="m.gpus && m.gpus.length" class="gpu-underline"
-                  :style="{ background: gpuUnderline(m.gpus) }"
-                  :title="'Assigned to GPU ' + m.gpus.join(', ')"></div>
+                <!-- Line 2: GPU dots — one per physical GPU, lit for the GPUs
+                     this model is pinned to when it's loaded (left) + parsed
+                     param/active/descriptor tags (right). -->
+                <div class="flex items-center justify-between gap-2 mt-1 min-w-0">
+                  <div class="flex items-center gap-1 flex-shrink-0">
+                    <span class="text-[0.55rem] uppercase tracking-wider opacity-40 font-mono">GPU</span>
+                    <span v-for="d in gpuDots(m)" :key="d.idx" class="gpu-dot"
+                      :style="dotStyle(d, m.loaded)"
+                      :title="'GPU ' + d.idx + (d.assigned ? (m.loaded ? ' — loaded' : ' — assigned') : '')"></span>
+                  </div>
+                  <div v-if="m.tags.length" class="flex items-center gap-1 flex-wrap justify-end min-w-0">
+                    <span v-for="(t, i) in m.tags" :key="i" class="model-tag"
+                      :style="tagStyle(t)">{{ t.text }}</span>
+                  </div>
+                </div>
               </div>
                 <div v-if="models.length === 0" class="text-xs opacity-40 text-center py-2">No models</div>
               </div>
@@ -475,22 +486,90 @@
           return pal()[GPU_COLOR_KEYS[idx % GPU_COLOR_KEYS.length]];
         }
 
+        // Matches a bare param-count segment (e.g. "20B", "6.5b") and an MoE
+        // active-param segment (e.g. "a3b", "A5B"). The first param/active
+        // segment marks where the model name ends and the tag list begins.
+        const PARAM_RE = /^\d+(?:\.\d+)?[bB]$/;
+        const ACTIVE_RE = /^[aA]\d+(?:\.\d+)?[bB]$/;
+
         /**
-         * Builds the CSS `background` for a model row's GPU underline.
+         * Splits a model id into a display name and a list of typed tags.
          *
-         * One GPU → a solid color; several → equal hard-stop segments left to
-         * right, one per GPU, in GPU-index order.
+         * The id is split on '-'; the first segment that is a param count
+         * (`20B`) or an MoE active-param count (`a3b`) begins the tag list, and
+         * everything before it is the name. Each tag is typed 'param', 'active',
+         * or 'plain' so the row can color the counts and neutralize descriptors.
+         * If no param segment is found the whole id is the name (no tags).
          *
-         * @param {number[]} gpuList  - the physical GPU indices the model spans
-         * @returns {string} a color or linear-gradient usable as `background`
+         * @param {string} id  - the model id, e.g. "gemma-4-26b-a4b-uncensored"
+         * @returns {{name: string, tags: {text: string, kind: string}[]}}
          */
-        function gpuUnderline(gpuList) {
-          if (!gpuList || !gpuList.length) return 'transparent';
-          if (gpuList.length === 1) return gpuColor(gpuList[0]);
-          const n = gpuList.length;
-          const stops = gpuList.map((g, i) =>
-            `${gpuColor(g)} ${(i / n * 100).toFixed(2)}% ${((i + 1) / n * 100).toFixed(2)}%`);
-          return `linear-gradient(to right, ${stops.join(', ')})`;
+        function parseModel(id) {
+          const parts = String(id).split('-');
+          let idx = -1;
+          for (let i = 0; i < parts.length; i++) {
+            if (PARAM_RE.test(parts[i]) || ACTIVE_RE.test(parts[i])) { idx = i; break; }
+          }
+          if (idx === -1) return { name: id, tags: [] };
+          const name = parts.slice(0, idx).join('-') || id;
+          const tags = parts.slice(idx).map(t => ({
+            text: t,
+            kind: PARAM_RE.test(t) ? 'param' : ACTIVE_RE.test(t) ? 'active' : 'plain',
+          }));
+          return { name, tags };
+        }
+
+        /**
+         * Builds the per-GPU dot descriptors for one model row.
+         *
+         * Emits one entry per physical GPU (falling back to the model's own span
+         * when the total count is unknown), flagging which GPUs the model is
+         * pinned to so the row can light those and dim the rest.
+         *
+         * @param {{gpus: number[]}} m  - the model, with its assigned GPU list
+         * @returns {{idx: number, assigned: boolean, color: string}[]}
+         */
+        function gpuDots(m) {
+          const assigned = new Set(m.gpus || []);
+          const total = numGpus.value || gpuLegend.value.length ||
+            ((m.gpus && m.gpus.length) ? Math.max(...m.gpus) + 1 : 0);
+          const out = [];
+          for (let g = 0; g < total; g++) {
+            out.push({ idx: g, assigned: assigned.has(g), color: gpuColor(g) });
+          }
+          return out;
+        }
+
+        /**
+         * Inline style for a single GPU dot given its assignment + load state.
+         *
+         * Assigned GPUs draw in their GPU color — solid when the model is loaded,
+         * a hollow ring when it isn't; unassigned GPUs render as a faint ring.
+         *
+         * @param {{assigned: boolean, color: string}} d  - the dot descriptor
+         * @param {boolean} loaded  - whether the model is currently loaded
+         * @returns {object} an inline-style object
+         */
+        function dotStyle(d, loaded) {
+          if (!d.assigned) return { background: 'transparent', border: '1px solid ' + pal().surface2, opacity: 0.35 };
+          if (loaded) return { background: d.color, border: '1px solid ' + d.color };
+          return { background: 'transparent', border: '1.5px solid ' + d.color, opacity: 0.7 };
+        }
+
+        /**
+         * Inline style for a parsed name tag, colored by its kind.
+         *
+         * Param and active-param counts get a tinted, outlined chip in a fixed
+         * palette hue; plain descriptor tags stay neutral on the surface color.
+         *
+         * @param {{kind: string}} t  - the tag descriptor
+         * @returns {object} an inline-style object
+         */
+        function tagStyle(t) {
+          const p = pal();
+          if (t.kind === 'param') return { color: p.blue, borderColor: p.blue, background: p.blue + '1f' };
+          if (t.kind === 'active') return { color: p.mauve, borderColor: p.mauve, background: p.mauve + '1f' };
+          return { color: p.subtext0, borderColor: 'transparent', background: p.surface1 };
         }
 
         // GPU indices shown in the Models-header color key: every physical GPU
@@ -567,13 +646,18 @@
           try {
             const data = await (await fetch('/router/models')).json();
             const list = data.data || data.models || [];
-            models.value = list.map(m => ({
-              id: m.id,
-              loaded: m.status?.value === 'loaded',
-              args: m.status?.args || [],
-              gpus: m.gpus || [],
-              loading: !!loadingModels[m.id],
-            }));
+            models.value = list.map(m => {
+              const parsed = parseModel(m.id);
+              return {
+                id: m.id,
+                displayName: parsed.name,
+                tags: parsed.tags,
+                loaded: m.status?.value === 'loaded',
+                args: m.status?.args || [],
+                gpus: m.gpus || [],
+                loading: !!loadingModels[m.id],
+              };
+            });
             // Pre-assign colors for all models
             for (const m of models.value) {
               modelColor(m.id);
@@ -1048,7 +1132,8 @@
           historySort, historyChartMode, statusColor, statusDotClass, sortedHistory,
           ranges: RANGES, historyRange, setHistoryRange, historyStats,
           pal_blue, pal_green, fmtStat: fmtNum,
-          formatTime, fetchHistory, routerAction, modelColor, gpuColor, gpuUnderline, gpuLegend,
+          formatTime, fetchHistory, routerAction, modelColor, gpuColor, gpuLegend,
+          gpuDots, dotStyle, tagStyle,
           loadModel, unloadModel, resetHistory, sortHistory, updateHistoryChart,
           gpuUtilChart, gpuVramChart, statusChart, historyChart,
         };
