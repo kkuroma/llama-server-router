@@ -151,35 +151,41 @@
             <div class="relative min-h-0 lg:flex-1">
               <div class="space-y-2 overflow-y-auto pr-1 max-h-96 lg:max-h-none lg:absolute lg:inset-0">
               <div v-for="m in models" :key="m.id"
-                class="model-row px-2 py-1.5 rounded-lg bg-base-100/50"
+                class="model-row flex items-stretch gap-2 px-2 py-1.5 rounded-lg bg-base-100/50"
                 :style="{ borderLeftColor: modelColor(m.id) }">
-                <!-- Line 1: model name (left) + load/unload (right). -->
-                <div class="flex items-center justify-between gap-2 min-w-0">
-                  <span class="font-mono text-xs truncate" :title="m.id" :style="{ color: modelColor(m.id) }">{{ m.displayName }}</span>
-                  <button class="btn btn-xs flex-shrink-0"
-                    :style="m.loading ? {} : { borderColor: modelColor(m.id), color: modelColor(m.id), backgroundColor: 'transparent' }"
-                    :class="m.loading ? 'btn-disabled' : ''"
-                    @click="m.loaded ? unloadModel(m.id) : loadModel(m.id)"
-                    :disabled="m.loading">
-                    <span v-if="m.loading" class="loading loading-spinner loading-xs"></span>
-                    <span v-else class="text-xs">{{ m.loaded ? 'Unload' : 'Load' }}</span>
-                  </button>
-                </div>
-                <!-- Line 2: GPU dots — one per physical GPU, lit for the GPUs
-                     this model is pinned to when it's loaded (left) + parsed
-                     param/active/descriptor tags (right). -->
-                <div class="flex items-center justify-between gap-2 mt-1 min-w-0">
-                  <div class="flex items-center gap-1 flex-shrink-0">
-                    <span class="text-[0.55rem] uppercase tracking-wider opacity-40 font-mono">GPU</span>
-                    <span v-for="d in gpuDots(m)" :key="d.idx" class="gpu-dot"
-                      :style="dotStyle(d, m.loaded)"
-                      :title="'GPU ' + d.idx + (d.assigned ? (m.loaded ? ' — loaded' : ' — assigned') : '')"></span>
-                  </div>
-                  <div v-if="m.tags.length" class="flex items-center gap-1 flex-wrap justify-end min-w-0">
-                    <span v-for="(t, i) in m.tags" :key="i" class="model-tag"
+                <!-- Left: two left-aligned lines (name + param tags, then GPU
+                     dots + descriptor tags). -->
+                <div class="flex-1 min-w-0 flex flex-col gap-1">
+                  <!-- Line 1: model name + param/active-param tags. -->
+                  <div class="flex items-center gap-1.5 min-w-0">
+                    <span class="font-mono text-xs truncate" :title="m.id" :style="{ color: modelColor(m.id) }">{{ m.displayName }}</span>
+                    <span v-for="(t, i) in m.paramTags" :key="i" class="model-tag flex-shrink-0"
                       :style="tagStyle(t)">{{ t.text }}</span>
                   </div>
+                  <!-- Line 2: GPU dots — one per physical GPU, lit for the GPUs
+                       this model is pinned to when loaded — + descriptor tags. -->
+                  <div class="flex items-center gap-1.5 min-w-0">
+                    <div class="flex items-center gap-1 flex-shrink-0">
+                      <span class="text-[0.55rem] uppercase tracking-wider opacity-40 font-mono">GPU</span>
+                      <span v-for="d in gpuDots(m)" :key="d.idx" class="gpu-dot"
+                        :style="dotStyle(d, m.loaded)"
+                        :title="'GPU ' + d.idx + (d.assigned ? (m.loaded ? ' — loaded' : ' — assigned') : '')"></span>
+                    </div>
+                    <div v-if="m.plainTags.length" class="flex items-center gap-1 flex-wrap min-w-0">
+                      <span v-for="(t, i) in m.plainTags" :key="i" class="model-tag"
+                        :style="tagStyle(t)">{{ t.text }}</span>
+                    </div>
+                  </div>
                 </div>
+                <!-- Load/unload spans the full height of both lines. -->
+                <button class="btn btn-xs flex-shrink-0 self-stretch h-auto"
+                  :style="m.loading ? {} : { borderColor: modelColor(m.id), color: modelColor(m.id), backgroundColor: 'transparent' }"
+                  :class="m.loading ? 'btn-disabled' : ''"
+                  @click="m.loaded ? unloadModel(m.id) : loadModel(m.id)"
+                  :disabled="m.loading">
+                  <span v-if="m.loading" class="loading loading-spinner loading-xs"></span>
+                  <span v-else class="text-xs">{{ m.loaded ? 'Unload' : 'Load' }}</span>
+                </button>
               </div>
                 <div v-if="models.length === 0" class="text-xs opacity-40 text-center py-2">No models</div>
               </div>
@@ -651,7 +657,10 @@
               return {
                 id: m.id,
                 displayName: parsed.name,
-                tags: parsed.tags,
+                // param/active counts ride line 1 with the name; plain
+                // descriptors drop to line 2 with the GPU dots.
+                paramTags: parsed.tags.filter(t => t.kind !== 'plain'),
+                plainTags: parsed.tags.filter(t => t.kind === 'plain'),
                 loaded: m.status?.value === 'loaded',
                 args: m.status?.args || [],
                 gpus: m.gpus || [],
