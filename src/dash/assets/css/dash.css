@@ -64,15 +64,19 @@ body {
 
 /* --- router controls --- */
 
-/* Always one line tall so the card doesn't jump as ports come and go. */
+/* Pinned to its measured height in the "serving" state (156px @ 16px base)
+   so status text, ports, and spinner swaps can't resize it. */
+.router-card { height: 9.75rem; flex-shrink: 0; }
+/* Always one line tall (1.6em = the line-height) so ports coming and going
+   can't shift the button row. */
 .ports {
-  font-size: 0.72rem; opacity: 0.5; min-height: 1.2em;
+  font-size: 0.72rem; opacity: 0.5; min-height: 1.6em;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .btn-row { display: flex; gap: 0.5rem; }
 .action-btn {
   flex: 1; display: inline-flex; align-items: center; justify-content: center;
-  padding: 0.32rem 0.6rem; font: inherit; font-size: 0.8rem; font-weight: 600;
+  height: 2rem; padding: 0 0.6rem; font: inherit; font-size: 0.8rem; font-weight: 600;
   color: var(--accent); border: 1px solid var(--accent); border-radius: 0.5rem;
   background: transparent; cursor: pointer; transition: background-color 0.15s;
 }
@@ -136,11 +140,10 @@ body {
 
 /* --- charts --- */
 
-.charts-row { display: grid; grid-template-columns: 2fr 1fr; gap: 1rem; flex-shrink: 0; }
-/* Both GPU grids + their shared zoom slider live in this one echarts instance. */
+/* All four GPU grids (util/vram/temp/power) + their shared zoom slider live
+   in this one full-width echarts instance. */
+.gpu-card { flex-shrink: 0; }
 .gpu-chart { width: 100%; height: clamp(150px, 24vh, 260px); }
-/* Status timeline fills its card so its bottom axis lines up with the GPU charts. */
-.chart-fill { flex: 1; min-height: 120px; }
 
 /* --- request history --- */
 

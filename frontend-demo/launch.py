@@ -76,6 +76,9 @@ class Sim:
         self.serving_until: dict[int, float] = {g["index"]: 0.0 for g in MD.GPUS}
         self.util_history: dict[int, list] = {g["index"]: [] for g in MD.GPUS}
         self.vram_history: dict[int, list] = {g["index"]: [] for g in MD.GPUS}
+        self.temp_history: dict[int, list] = {g["index"]: [] for g in MD.GPUS}
+        self.power_history: dict[int, list] = {g["index"]: [] for g in MD.GPUS}
+        self._temp: dict[int, float] = {g["index"]: 40.0 for g in MD.GPUS}
         self.timeline: dict[int, list] = {}                  # gpu -> [(ts, status)]
         self._last_status: dict[int, str] = {}
         self.history: list[dict] = []                        # request rows, newest last
@@ -105,13 +108,17 @@ class Sim:
             self._add_history_row(now - age)
         self.history.sort(key=lambda r: r["request_time"])
 
-        # Backfill GPU util/VRAM history across the 2h window at flush cadence.
+        # Backfill GPU telemetry across the 2h window at flush cadence.
         t = now - GPU_WINDOW
         while t < now:
             for g in MD.GPUS:
                 gi = g["index"]
-                self.util_history[gi].append((round(t, 1), round(random.uniform(2, 18), 1)))
+                util = random.uniform(2, 18)
+                temp, power = self._telemetry_for(gi, util)
+                self.util_history[gi].append((round(t, 1), round(util, 1)))
                 self.vram_history[gi].append((round(t, 1), round(self._vram_for(gi) + random.uniform(-120, 120), 1)))
+                self.temp_history[gi].append((round(t, 1), temp))
+                self.power_history[gi].append((round(t, 1), power))
             t += GPU_FLUSH
         self._last_flush = now
         # Prime the timeline so every lane starts labeled.
@@ -139,6 +146,20 @@ class Sim:
         for mid in self.swaps:
             out.update(self.by_id[mid]["gpus"])
         return out
+
+    def _telemetry_for(self, gpu: int, util: float) -> tuple[float, float]:
+        """Fabricates a (temp_c, power_w) pair consistent with a util sample.
+
+        Temp is a first-order lag toward a util-derived target (~38C idle,
+        ~82C flat out) so it ramps and cools smoothly; power tracks util
+        toward ~90% of the card's limit with sensor noise."""
+        limit = next(g["power_limit_w"] for g in MD.GPUS if g["index"] == gpu)
+        prev = self._temp.get(gpu, 40.0)
+        target = 38.0 + (util / 100.0) * 44.0
+        temp = prev + (target - prev) * 0.25 + random.uniform(-0.8, 0.8)
+        self._temp[gpu] = temp
+        power = 22.0 + (util / 100.0) * (limit * 0.9 - 22.0) + random.uniform(-8, 8)
+        return round(temp, 1), round(max(power, 8.0), 1)
 
     def _vram_for(self, gpu: int) -> float:
         """Baseline resident VRAM (MB) on a GPU from the models loaded on it."""
@@ -252,7 +273,7 @@ class Sim:
             if len(self.history) > 6000:
                 self.history = [r for r in self.history if r["request_time"] > cutoff]
 
-            # 5) flush a GPU util/VRAM sample on cadence.
+            # 5) flush a GPU telemetry sample on cadence.
             if now - self._last_flush >= GPU_FLUSH:
                 self._last_flush = now
                 swapping = self._swapping_gpus()
@@ -266,10 +287,13 @@ class Sim:
                         util = random.uniform(25, 70)
                     else:
                         util = random.uniform(1, 9)
+                    temp, power = self._telemetry_for(gi, util)
                     self.util_history[gi].append((round(now, 1), round(util, 1)))
                     self.vram_history[gi].append((round(now, 1), round(self._vram_for(gi) + random.uniform(-100, 100), 1)))
-                    self.util_history[gi] = [(t, v) for t, v in self.util_history[gi] if t > gcut]
-                    self.vram_history[gi] = [(t, v) for t, v in self.vram_history[gi] if t > gcut]
+                    self.temp_history[gi].append((round(now, 1), temp))
+                    self.power_history[gi].append((round(now, 1), power))
+                    for hist in (self.util_history, self.vram_history, self.temp_history, self.power_history):
+                        hist[gi] = [(t, v) for t, v in hist[gi] if t > gcut]
 
             # 6) record status transitions for the timeline lanes.
             self._record_timeline(now)
@@ -336,8 +360,11 @@ class Sim:
                         "index": g["index"],
                         "name": g["name"],
                         "total_vram_mb": g["total_vram_mb"],
+                        "power_limit_w": g["power_limit_w"],
                         "util_history": list(self.util_history[g["index"]]),
                         "vram_history": list(self.vram_history[g["index"]]),
+                        "temp_history": list(self.temp_history[g["index"]]),
+                        "power_history": list(self.power_history[g["index"]]),
                     }
                     for g in MD.GPUS
                 ]

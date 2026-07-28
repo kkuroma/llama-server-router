@@ -54,7 +54,6 @@ createApp({
     const historyRange = ref('24h');
 
     const gpuChart = ref(null);
-    const statusChart = ref(null);
     const historyChart = ref(null);
 
     let chartSet = null;
@@ -198,13 +197,6 @@ createApp({
       } catch {}
     }
 
-    async function fetchTimeline() {
-      try {
-        const data = await api.getTimeline();
-        if (chartSet) charts.renderStatus(chartSet.status, data.entries || {}, gpus.value.map(g => g.index));
-      } catch {}
-    }
-
     async function fetchHistory() {
       try {
         // Load only the selected window; cap rows so a huge DB can't stall.
@@ -264,11 +256,8 @@ createApp({
     }
 
     function initCharts() {
-      chartSet = charts.makeCharts({
-        gpu: gpuChart.value, status: statusChart.value, history: historyChart.value,
-      });
+      chartSet = charts.makeCharts({ gpu: gpuChart.value, history: historyChart.value });
       updateGpuCharts();
-      charts.renderStatus(chartSet.status, {}, gpus.value.map(g => g.index));
       updateHistoryChart();
     }
 
@@ -281,14 +270,14 @@ createApp({
       disposeCharts();
       nextTick(async () => {
         initCharts();
-        await Promise.all([fetchGpu(), fetchTimeline(), fetchHistory()]);
+        await Promise.all([fetchGpu(), fetchHistory()]);
       });
     }
 
     // --- lifecycle ---
 
     async function pollAll() {
-      await Promise.all([fetchStatus(), fetchModels(), fetchGpu(), fetchTimeline(), fetchHistory()]);
+      await Promise.all([fetchStatus(), fetchModels(), fetchGpu(), fetchHistory()]);
     }
 
     onMounted(async () => {
@@ -317,7 +306,7 @@ createApp({
       ranges: RANGES, historyRange, setHistoryRange, setChartMode,
       fetchHistory, resetHistory, sortHistory, routerAction,
       fmtNum, formatTime, pal_blue, pal_green,
-      gpuChart, statusChart, historyChart,
+      gpuChart, historyChart,
     };
   },
 }).mount('#app');

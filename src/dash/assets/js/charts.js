@@ -1,6 +1,6 @@
 // ECharts rendering. Every render reads the live palette, so a theme change
 // only needs dispose + re-render (app.js handles that).
-import { pal, gpuColor, statusColors } from './colors.js';
+import { pal, gpuColor } from './colors.js';
 import { fmtNum } from './format.js';
 
 function areaGradient(color, topAlpha, botAlpha) {
@@ -14,7 +14,6 @@ export function makeCharts(els) {
   const opts = { renderer: 'canvas' };
   return {
     gpu: echarts.init(els.gpu, null, opts),
-    status: echarts.init(els.status, null, opts),
     history: echarts.init(els.history, null, opts),
   };
 }
@@ -66,8 +65,10 @@ function smoothWithGaps(points, sigma = 2) {
   return out;
 }
 
-// All GPUs on one utilization grid + one VRAM grid, one line per GPU in its
-// fixed color, sharing a single zoom slider (default window: last 30 min).
+// All GPUs on four grids — utilization, VRAM, temperature, power — one line
+// per GPU in its fixed color, sharing a single zoom slider (default window:
+// last 30 min). temp/power histories may be absent from an older backend;
+// those grids just render empty.
 export function renderGpu(chart, gpus) {
   const p = pal();
 
@@ -91,11 +92,15 @@ export function renderGpu(chart, gpus) {
 
   const maxVram = Math.max(1, ...gpus.map(g => g.total_vram_mb || 0));
   const totals = [...new Set(gpus.map(g => g.total_vram_mb).filter(Boolean))];
-  const utilCount = gpus.length;
+  const limits = [...new Set(gpus.map(g => g.power_limit_w).filter(Boolean))];
+  const maxPower = limits.length ? Math.ceil(Math.max(...limits) * 1.05) : undefined;
+  const n = gpus.length;
+  const GRID_LEFT = ['0%', '25.75%', '51.5%', '77.25%'];
 
   const titleStyle = { color: p.overlay1, fontSize: 10, fontWeight: 600 };
   const axisBase = {
     type: 'time',
+    splitNumber: 4, // the grids are ~1/4 card wide; more ticks run together
     axisLine: { lineStyle: { color: p.surface1 } },
     axisTick: { show: false },
     axisLabel: { color: p.overlay0, fontSize: 9, formatter: '{HH}:{mm}', hideOverlap: true },
@@ -112,28 +117,27 @@ export function renderGpu(chart, gpus) {
     itemStyle: { color: gpuColor(g.index) },
   });
 
-  const utilSeries = gpus.map(g => ({
-    ...lineBase(g), xAxisIndex: 0, yAxisIndex: 0,
-    data: smoothWithGaps(g.util_history.map(([t, v]) => [t * 1000, v])),
-  }));
-  const vramSeries = gpus.map((g, i) => ({
-    ...lineBase(g), xAxisIndex: 1, yAxisIndex: 1,
-    data: smoothWithGaps(g.vram_history.map(([t, v]) => [t * 1000, v])),
-    ...(i === 0 && totals.length ? {
-      markLine: {
-        silent: true, symbol: 'none',
-        data: totals.map(t => ({ yAxis: t, lineStyle: { color: p.red, type: 'dashed', width: 1, opacity: 0.5 } })),
-        label: { show: false },
-      },
-    } : {}),
+  const capLines = (values) => ({
+    markLine: {
+      silent: true, symbol: 'none',
+      data: values.map(v => ({ yAxis: v, lineStyle: { color: p.red, type: 'dashed', width: 1, opacity: 0.5 } })),
+      label: { show: false },
+    },
+  });
+  const metricSeries = (axis, key, caps) => gpus.map((g, i) => ({
+    ...lineBase(g), xAxisIndex: axis, yAxisIndex: axis,
+    data: smoothWithGaps((g[key] || []).map(([t, v]) => [t * 1000, v])),
+    ...(i === 0 && caps && caps.length ? capLines(caps) : {}),
   }));
 
   chart.setOption({
     animation: false,
     textStyle: { color: p.subtext0, fontFamily: 'ui-monospace, monospace', fontSize: 10 },
     title: [
-      { text: 'UTILIZATION', left: 0, top: 0, textStyle: titleStyle },
-      { text: 'VRAM', left: '54%', top: 0, textStyle: titleStyle },
+      { text: 'UTILIZATION', left: GRID_LEFT[0], top: 0, textStyle: titleStyle },
+      { text: 'VRAM', left: GRID_LEFT[1], top: 0, textStyle: titleStyle },
+      { text: 'TEMP', left: GRID_LEFT[2], top: 0, textStyle: titleStyle },
+      { text: 'POWER', left: GRID_LEFT[3], top: 0, textStyle: titleStyle },
     ],
     tooltip: {
       trigger: 'axis',
@@ -147,32 +151,30 @@ export function renderGpu(chart, gpus) {
         const head = new Date(live[0].value[0]).toLocaleTimeString();
         let body = '';
         for (const s of live) {
-          const v = s.seriesIndex < utilCount
-            ? `${s.value[1].toFixed(0)}%`
-            : `${(s.value[1] / 1024).toFixed(1)} GB`;
-          const name = (gpus[s.seriesIndex % utilCount] || {}).name || '';
+          const kind = Math.floor(s.seriesIndex / n);
+          const v = kind === 0 ? `${s.value[1].toFixed(0)}%`
+            : kind === 1 ? `${(s.value[1] / 1024).toFixed(1)} GB`
+            : kind === 2 ? `${s.value[1].toFixed(0)}°C`
+            : `${s.value[1].toFixed(0)}W`;
+          const name = (gpus[s.seriesIndex % n] || {}).name || '';
           body += `<div style="display:flex;justify-content:space-between;gap:16px">` +
                   `<span>${s.marker}${s.seriesName} <span style="opacity:.55">${name}</span></span><b>${v}</b></div>`;
         }
         return `<div style="opacity:.6;margin-bottom:3px">${head}</div>${body}`;
       },
     },
-    grid: [
-      { top: 22, bottom: 44, left: 0, width: '46%', containLabel: true },
-      { top: 22, bottom: 44, left: '54%', width: '46%', containLabel: true },
-    ],
-    xAxis: [
-      { ...axisBase, gridIndex: 0 },
-      { ...axisBase, gridIndex: 1 },
-    ],
+    grid: GRID_LEFT.map(left => ({ top: 22, bottom: 44, left, width: '22.75%', containLabel: true })),
+    xAxis: GRID_LEFT.map((_, i) => ({ ...axisBase, gridIndex: i })),
     yAxis: [
       { ...yBase, gridIndex: 0, min: 0, max: 100, axisLabel: { color: p.overlay0, fontSize: 9, formatter: '{value}%' } },
       { ...yBase, gridIndex: 1, min: 0, max: Math.ceil(maxVram), axisLabel: { color: p.overlay0, fontSize: 9, formatter: v => `${(v / 1024).toFixed(0)}G` } },
+      { ...yBase, gridIndex: 2, min: 0, max: 100, axisLabel: { color: p.overlay0, fontSize: 9, formatter: '{value}°' } },
+      { ...yBase, gridIndex: 3, min: 0, max: maxPower, axisLabel: { color: p.overlay0, fontSize: 9, formatter: '{value}W' } },
     ],
     dataZoom: [
-      { type: 'inside', xAxisIndex: [0, 1], filterMode: 'none', start: zStart, end: zEnd },
+      { type: 'inside', xAxisIndex: [0, 1, 2, 3], filterMode: 'none', start: zStart, end: zEnd },
       {
-        type: 'slider', xAxisIndex: [0, 1], filterMode: 'none', height: 16, bottom: 2,
+        type: 'slider', xAxisIndex: [0, 1, 2, 3], filterMode: 'none', height: 16, bottom: 2,
         left: 4, right: 4, start: zStart, end: zEnd,
         borderColor: 'transparent', backgroundColor: p.surface0 + '66',
         fillerColor: p.blue + '22',
@@ -184,86 +186,13 @@ export function renderGpu(chart, gpus) {
         labelFormatter: (v) => new Date(v).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
       },
     ],
-    series: [...utilSeries, ...vramSeries],
+    series: [
+      ...metricSeries(0, 'util_history'),
+      ...metricSeries(1, 'vram_history', totals),
+      ...metricSeries(2, 'temp_history'),
+      ...metricSeries(3, 'power_history', limits),
+    ],
   }, true);
-}
-
-// Per-GPU status timeline: one horizontal lane per GPU, consecutive entries
-// drawn as colored segments spanning to the next entry (or now). Falls back
-// to fallbackLanes so an empty timeline still shows a lane per known GPU.
-export function renderStatus(chart, entries, fallbackLanes) {
-  const p = pal();
-  const sc = statusColors();
-  let gpuIdx = Object.keys(entries).map(Number).sort((a, b) => a - b);
-  if (!gpuIdx.length) gpuIdx = [...fallbackLanes].sort((a, b) => a - b);
-  if (!gpuIdx.length) gpuIdx = [0];
-  const now = Date.now();
-  const segments = [];
-  gpuIdx.forEach((g, lane) => {
-    const laneEntries = entries[g] || entries[String(g)] || [];
-    for (let i = 0; i < laneEntries.length; i++) {
-      const [ts, status] = laneEntries[i];
-      const start = ts * 1000;
-      const end = i + 1 < laneEntries.length ? laneEntries[i + 1][0] * 1000 : now;
-      segments.push({
-        value: [start, lane, end, status, g],
-        itemStyle: { color: sc[status] || p.surface1 },
-      });
-    }
-  });
-
-  // Center the lane block vertically instead of stretching lanes across the
-  // whole card: fixed height per lane, time labels right below the lanes.
-  const chartH = chart.getHeight();
-  const plotH = Math.min(Math.max(chartH - 46, 40), gpuIdx.length * 48);
-  const gridTop = Math.max(8, (chartH - plotH - 20) / 2);
-
-  chart.setOption({
-    animation: false,
-    textStyle: { color: p.subtext0, fontFamily: 'ui-monospace, monospace', fontSize: 10 },
-    grid: { top: gridTop, height: plotH, left: 48, right: 12 },
-    xAxis: {
-      type: 'time',
-      axisLine: { lineStyle: { color: p.surface1 } },
-      axisTick: { show: false },
-      axisLabel: { color: p.overlay0, fontSize: 9, formatter: '{HH}:{mm}', hideOverlap: true },
-      splitLine: { show: false },
-    },
-    yAxis: {
-      type: 'category',
-      data: gpuIdx.map(g => `GPU ${g}`),
-      axisLine: { show: false },
-      axisTick: { show: false },
-      axisLabel: { color: p.overlay0, fontSize: 9 },
-      splitLine: { show: false },
-    },
-    tooltip: {
-      backgroundColor: p.surface0, borderColor: p.surface1, borderWidth: 1,
-      textStyle: { color: p.text, fontSize: 11 },
-      formatter: params => {
-        const d = params.data.value;
-        const s = new Date(d[0]).toLocaleTimeString();
-        const e = new Date(d[2]).toLocaleTimeString();
-        return `GPU ${d[4]}: <span style="color:${sc[d[3]] || p.text}">${d[3]}</span><br/>${s} - ${e}`;
-      },
-    },
-    series: [{
-      type: 'custom',
-      renderItem: (params, api) => {
-        const lane = api.value(1);
-        const start = api.coord([api.value(0), lane]);
-        const end = api.coord([api.value(2), lane]);
-        const h = Math.min(api.size([0, 1])[1] * 0.55, 24);
-        return {
-          type: 'rect',
-          shape: { x: start[0], y: start[1] - h / 2, width: Math.max(end[0] - start[0], 2), height: h },
-          style: { fill: api.visual('color') },
-        };
-      },
-      encode: { x: [0, 2], y: 1 },
-      data: segments,
-    }],
-  });
 }
 
 // Hierarchical tick labels so axis resolution follows the zoom; min/max pin

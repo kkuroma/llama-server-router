@@ -15,18 +15,23 @@ class GpuSnapshot(TypedDict):
     index: int
     name: str
     total_vram_mb: float
+    power_limit_w: float
     util_history: list[tuple[float, float]]
     vram_history: list[tuple[float, float]]
+    temp_history: list[tuple[float, float]]
+    power_history: list[tuple[float, float]]
 
 
 class GPUMonitor:
     """
-    Samples every NVIDIA GPU's utilization and VRAM once per second, keeping a
-    rolling per-GPU window
+    Samples every NVIDIA GPU's utilization, VRAM, temperature, and power draw
+    once per second, keeping a rolling per-GPU window
 
     Detects all devices via NVML at startup and, for each, buffers per-second
     samples and flushes their maxima every FLUSH_INTERVAL to keep history compact.
     All GPUs flush on one shared cadence so their timestamps stay aligned.
+    Temp/power reads are optional per device — an unsupported sensor just leaves
+    that history empty.
     """
 
     def __init__(self):
@@ -36,7 +41,7 @@ class GPUMonitor:
         count = pynvml.nvmlDeviceGetCount()
         if count == 0:
             raise RuntimeError("no NVIDIA GPUs detected")
-        # One state dict per GPU. util_history/vram_history are the flushed rolling
+        # One state dict per GPU. The *_history lists are the flushed rolling
         # windows; the _samples lists buffer the current interval's per-second reads.
         self.gpus: list[dict[str, Any]] = []
         for i in range(count):
@@ -49,15 +54,24 @@ class GPUMonitor:
                     name = name.decode()
             except Exception:
                 name = f"GPU {i}"
+            try:
+                power_limit_w = pynvml.nvmlDeviceGetEnforcedPowerLimit(handle) / 1000.0
+            except Exception:
+                power_limit_w = 0.0
             self.gpus.append({
                 "index": i,
                 "handle": handle,
                 "name": name,
                 "total_vram_mb": int(pynvml.nvmlDeviceGetMemoryInfo(handle).total) / (1024 ** 2),
+                "power_limit_w": power_limit_w,
                 "util_history": [],   # (unix_ts, percent)
                 "vram_history": [],   # (unix_ts, used_mb)
+                "temp_history": [],   # (unix_ts, deg_c)
+                "power_history": [],  # (unix_ts, watts)
                 "_util_samples": [],
                 "_vram_samples": [],
+                "_temp_samples": [],
+                "_power_samples": [],
             })
         self._last_flush_time: float = time.time()
 
@@ -68,7 +82,7 @@ class GPUMonitor:
 
     def poll(self):
         """
-        Records one utilization/VRAM sample per GPU, flushing maxima on the interval
+        Records one util/VRAM/temp/power sample per GPU, flushing maxima on the interval
 
         Called every 1s from a background thread; on flush each GPU appends its
         window maxima and drops history older than WINDOW_SECONDS
@@ -79,18 +93,25 @@ class GPUMonitor:
             mem = pynvml.nvmlDeviceGetMemoryInfo(g["handle"])
             g["_util_samples"].append(util.gpu)
             g["_vram_samples"].append(int(mem.used) / (1024 ** 2))
+            try:
+                g["_temp_samples"].append(pynvml.nvmlDeviceGetTemperature(g["handle"], pynvml.NVML_TEMPERATURE_GPU))
+            except Exception:
+                pass  # sensor unsupported on this device
+            try:
+                g["_power_samples"].append(pynvml.nvmlDeviceGetPowerUsage(g["handle"]) / 1000.0)
+            except Exception:
+                pass
 
         now = time.time()
         if now - self._last_flush_time >= FLUSH_INTERVAL:
             cutoff = now - WINDOW_SECONDS
             for g in self.gpus:
-                if g["_util_samples"]:
-                    g["util_history"].append((now, round(max(g["_util_samples"]), 1)))
-                    g["vram_history"].append((now, round(max(g["_vram_samples"]), 1)))
-                    g["_util_samples"].clear()
-                    g["_vram_samples"].clear()
-                g["util_history"] = [(t, v) for t, v in g["util_history"] if t > cutoff]
-                g["vram_history"] = [(t, v) for t, v in g["vram_history"] if t > cutoff]
+                for metric in ("util", "vram", "temp", "power"):
+                    samples = g[f"_{metric}_samples"]
+                    if samples:
+                        g[f"{metric}_history"].append((now, round(max(samples), 1)))
+                        samples.clear()
+                    g[f"{metric}_history"] = [(t, v) for t, v in g[f"{metric}_history"] if t > cutoff]
             self._last_flush_time = now
 
     def snapshot(self) -> list[GpuSnapshot]:
@@ -98,8 +119,8 @@ class GPUMonitor:
         Returns the JSON-serializable per-GPU histories for the API
 
         Returns:
-            list[GpuSnapshot]: one entry per GPU with index, name, total_vram_mb, and
-                the util_history / vram_history rolling windows (NVML handles omitted)
+            list[GpuSnapshot]: one entry per GPU with index, name, total_vram_mb,
+                power_limit_w, and the rolling windows (NVML handles omitted)
         """
         # self.gpus holds dynamic NVML-derived values, so widen before the cast.
         return [
@@ -107,8 +128,11 @@ class GPUMonitor:
                 "index": g["index"],
                 "name": g["name"],
                 "total_vram_mb": g["total_vram_mb"],
+                "power_limit_w": g["power_limit_w"],
                 "util_history": g["util_history"],
                 "vram_history": g["vram_history"],
+                "temp_history": g["temp_history"],
+                "power_history": g["power_history"],
             }))
             for g in self.gpus
         ]

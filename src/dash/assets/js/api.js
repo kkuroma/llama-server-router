@@ -4,7 +4,6 @@ const getJson = async (url) => (await fetch(url)).json();
 export const getStatus = () => getJson('/router');
 export const getModels = () => getJson('/router/models');
 export const getGpu = () => getJson('/router/gpu');
-export const getTimeline = () => getJson('/router/status_timeline');
 export const getHistory = (params) => getJson(`/router/history?${params}`);
 
 export const routerCommand = (action) => fetch(`/router/${action}`);

@@ -60,7 +60,7 @@
 
     <div class="dash-main">
       <div class="col-side">
-        <div class="card">
+        <div class="card router-card">
           <h2 class="panel-title">Router</h2>
           <div class="row">
             <span class="status-dot" :class="{ pulse: statusPulse }" :style="statusDotStyle"></span>
@@ -124,22 +124,16 @@
       </div>
 
       <div class="col-charts">
-        <div class="charts-row">
-          <div class="card">
-            <div class="card-head">
-              <h2 class="panel-title">GPU</h2>
-              <div v-if="gpuLegend.length" class="gpu-legend mono">
-                <span class="legend-label">GPU:</span>
-                <span v-for="g in gpuLegend" :key="g" :style="{ color: gpuColor(g) }"
-                  :title="gpuName(g)">{{ g }}</span>
-              </div>
+        <div class="card gpu-card">
+          <div class="card-head">
+            <h2 class="panel-title">GPU</h2>
+            <div v-if="gpuLegend.length" class="gpu-legend mono">
+              <span class="legend-label">GPU:</span>
+              <span v-for="g in gpuLegend" :key="g" :style="{ color: gpuColor(g) }"
+                :title="gpuName(g)">{{ g }}</span>
             </div>
-            <div ref="gpuChart" class="gpu-chart"></div>
           </div>
-          <div class="card">
-            <h2 class="panel-title">Router Status</h2>
-            <div ref="statusChart" class="chart-fill"></div>
-          </div>
+          <div ref="gpuChart" class="gpu-chart"></div>
         </div>
 
         <div class="card history-card">
