@@ -22,11 +22,14 @@
     .history-chart { width: 100%; height: 300px; }
     /* Model color dot stripe on model rows */
     .model-row { border-left: 3px solid transparent; }
-    /* Per-GPU assignment tag on model rows: color-coded by physical GPU index. */
+    /* Per-GPU assignment chip on model rows: a compact color-coded number per
+       physical GPU index (shares one muted "GPU" prefix), so a model spanning
+       several GPUs stays narrow instead of repeating the word each time. */
     .gpu-tag {
       font-size: 0.6rem; font-weight: 600; line-height: 1;
-      font-family: ui-monospace, monospace; letter-spacing: 0.02em;
-      padding: 0.15rem 0.3rem; border-radius: 0.35rem;
+      font-family: ui-monospace, monospace;
+      min-width: 0.95rem; text-align: center;
+      padding: 0.13rem 0.2rem; border-radius: 0.3rem;
       border: 1px solid currentColor; white-space: nowrap;
     }
     /* Compact summary stat cell above the history chart. */
@@ -147,12 +150,14 @@
                   <span class="font-mono text-xs truncate" :title="m.id" :style="{ color: modelColor(m.id) }">{{ m.id }}</span>
                 </div>
                 <div class="flex items-center gap-2 flex-shrink-0">
-                  <!-- GPU assignment: fixed placement from config.json, one
-                       color-coded tag per physical GPU this model is pinned to. -->
-                  <div v-if="m.gpus && m.gpus.length" class="flex items-center gap-1"
+                  <!-- GPU assignment: fixed placement from config.json. One muted
+                       "GPU" label, then a compact color-coded number per physical
+                       GPU this model is pinned to. -->
+                  <div v-if="m.gpus && m.gpus.length" class="flex items-center gap-0.5"
                     :title="'Assigned to GPU ' + m.gpus.join(', ')">
+                    <span class="text-[0.55rem] font-semibold uppercase tracking-wider opacity-40 mr-0.5">GPU</span>
                     <span v-for="g in m.gpus" :key="g" class="gpu-tag"
-                      :style="{ color: gpuColor(g) }">GPU {{ g }}</span>
+                      :style="{ color: gpuColor(g) }">{{ g }}</span>
                   </div>
                   <button class="btn btn-xs flex-shrink-0"
                   :style="m.loading ? {} : { borderColor: modelColor(m.id), color: modelColor(m.id), backgroundColor: 'transparent' }"
