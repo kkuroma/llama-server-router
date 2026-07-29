@@ -369,7 +369,7 @@ async def router_models():
     }
 
 @app.get("/v1/models")
-async def v1Models():
+async def v1_models():
     """
     Returns an OpenAI-compatible model listing served by the router itself
 

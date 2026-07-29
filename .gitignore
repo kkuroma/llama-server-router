@@ -11,3 +11,6 @@ __pycache__/
 /docker-compose.override.yml
 .venv/
 .direnv/
+
+# benchmark outputs (instance-specific, regenerable via scripts/)
+/outputs/
