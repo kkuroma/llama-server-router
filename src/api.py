@@ -45,7 +45,7 @@ class ProxyBody(TypedDict, total=False):
     stream: bool
 
 
-def getRouter() -> LLMRouter:
+def get_router() -> LLMRouter:
     """
     Returns the initialized router or raises if it is not ready yet
 
@@ -67,14 +67,14 @@ async def root():
     return RedirectResponse(url="/dash")
 
 @app.get("/router")
-async def routerStatus():
+async def router_status():
     """
     Returns the current router status and the ports of all live subprocesses
     """
-    r = getRouter()
+    r = get_router()
     return {
-        "status": r.overallStatus().value,
-        "gpu_status": {str(g): s for g, s in r.gpuStatuses().items()},
+        "status": r.overall_status().value,
+        "gpu_status": {str(g): s for g, s in r.gpu_statuses().items()},
         "ports": sorted(r.processes.keys()),
         "instances": {str(p): m for p, m in sorted(r.port_model.items())},
         "num_gpus": r.num_gpus,
@@ -84,33 +84,33 @@ async def routerStatus():
     }
 
 @app.get("/router/start")
-async def routerStart():
+async def router_start():
     """Starts the router if it is inactive or errored."""
-    r = getRouter()
+    r = get_router()
     if not r.status.value in ["inactive", "error"]:
         return {"success": True, "status": r.status.value}
     await r.start()
     return {"success": True, "status": r.status.value}
 
 @app.get("/router/stop")
-async def routerStop():
+async def router_stop():
     """Stops the router unless it is already inactive or errored."""
-    r = getRouter()
+    r = get_router()
     if r.status.value in ["inactive", "error"]:
         return {"success": True, "status": r.status.value}
     await r.stop()
     return {"success": True, "status": r.status.value}
 
 @app.get("/router/restart")
-async def routerRestart():
+async def router_restart():
     """Restarts the router by stopping and starting again."""
-    r = getRouter()
+    r = get_router()
     await r.restart()
     return {"success": True, "status": r.status.value}
 
 # overwrites /model/load /model/unload
 @app.post("/models/unload")
-async def routerUnload(body: ModelActionRequest):
+async def router_unload(body: ModelActionRequest):
     """
     Unloads a model by killing all of its replica processes
 
@@ -120,17 +120,17 @@ async def routerUnload(body: ModelActionRequest):
     Raises:
         HTTPException: 422 if "model" is missing, 404 if the model is unknown
     """
-    r = getRouter()
+    r = get_router()
     model_id = body.get("model")
     if not model_id:
         raise HTTPException(status_code=422, detail="Missing 'model' field")
     if not(model_id in r.router_config["LLM"].keys()):
         raise HTTPException(status_code=404, detail=f"Model {model_id} not found")
-    await r.unloadModel(model_id)
+    await r.unload_model(model_id)
     return {"success": True}
 
 @app.post("/models/load")
-async def routerLoad(body: ModelActionRequest):
+async def router_load(body: ModelActionRequest):
     """
     Loads a model, spawning its replica processes and evicting as needed
 
@@ -143,14 +143,14 @@ async def routerLoad(body: ModelActionRequest):
     Returns a 502 with the failure reason (e.g. worker CUDA OOM) instead of a
     bare 500 when the load fails, so the dashboard can surface why.
     """
-    r = getRouter()
+    r = get_router()
     model_id = body.get("model")
     if not model_id:
         raise HTTPException(status_code=422, detail="Missing 'model' field")
     if not(model_id in r.router_config["LLM"].keys()):
         raise HTTPException(status_code=404, detail=f"Model {model_id} not found")
     try:
-        result = await r.loadModel(model_id)
+        result = await r.load_model(model_id)
     except Exception as e:
         return JSONResponse(
             status_code=502,
@@ -162,7 +162,7 @@ async def routerLoad(body: ModelActionRequest):
 # History endpoints
 
 @app.get("/router/history")
-async def routerHistory(
+async def router_history(
     model: str | None = None,
     limit: int = 10000,
     since: float | None = None,
@@ -180,15 +180,15 @@ async def routerHistory(
     Returns:
         The list of history rows, most recent first
     """
-    r = getRouter()
+    r = get_router()
     limit = max(0, min(limit, 100000))
-    return await r.getHistory(model, limit, since, until)
+    return await r.get_history(model, limit, since, until)
 
 @app.get("/router/reset_history")
-async def routerResetHistory():
+async def router_reset_history():
     """Clears all request history."""
-    r = getRouter()
-    await r.resetHistory()
+    r = get_router()
+    await r.reset_history()
     return {"success": True}
 
 # Dashboard
@@ -209,7 +209,7 @@ async def dashboard():
 # Chat (themed shell + embedded llama.cpp UIs)
 
 @app.get("/chat")
-async def chatPage():
+async def chat_page():
     """
     Serves the chat single-page app
 
@@ -219,7 +219,7 @@ async def chatPage():
     bypasses the scheduler/RWLock. Same-origin (not the raw instance port) is
     what makes it work over Tailscale and behind a reverse proxy; bypassing the
     lock is what keeps the embedded UI's polling from starving the write-lock
-    unloadModel needs (which would leave the router stuck "serving").
+    unload_model needs (which would leave the router stuck "serving").
 
     Raises:
         HTTPException: 404 if the chat HTML is missing
@@ -272,12 +272,12 @@ _INSTANCE_SHIM = """<script>
 </script>"""
 
 @app.api_route("/instance/{port}/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
-async def instanceProxy(port: int, path: str, request: Request):
+async def instance_proxy(port: int, path: str, request: Request):
     """
     Same-origin pass-through proxy to a single llama-server replica
 
     Forwards the request straight to http://127.0.0.1:{port}/{path} WITHOUT
-    touching router.addRequest / the RWLock, so the embedded chat UI's polling
+    touching router.add_request / the RWLock, so the embedded chat UI's polling
     and streaming never take reader slots that would starve unload. Keeping it on
     the router's own port (rather than the raw instance port) is what lets it work
     over Tailscale and behind a reverse proxy. The instance's index HTML is
@@ -292,7 +292,7 @@ async def instanceProxy(port: int, path: str, request: Request):
     Raises:
         HTTPException: 404 if no live instance owns that port, 502 if it is unreachable
     """
-    r = getRouter()
+    r = get_router()
     if port not in r.processes:
         raise HTTPException(status_code=404, detail=f"No live instance on port {port}")
 
@@ -328,7 +328,7 @@ async def instanceProxy(port: int, path: str, request: Request):
     # Everything else streams through raw (content-encoding preserved).
     safe_headers = {k: v for k, v in resp.headers.items() if k.lower() not in ("content-length", "transfer-encoding", "connection", "keep-alive")}
 
-    async def streamUpstream():
+    async def stream_upstream():
         try:
             async for chunk in resp.aiter_raw():
                 yield chunk
@@ -337,14 +337,14 @@ async def instanceProxy(port: int, path: str, request: Request):
             await client.aclose()
 
     return StreamingResponse(
-        streamUpstream(),
+        stream_upstream(),
         status_code=resp.status_code,
         media_type=content_type or None,
         headers=safe_headers,
     )
 
 @app.get("/router/models")
-async def routerModels():
+async def router_models():
     """
     Returns all configured models with their current load status
 
@@ -353,8 +353,8 @@ async def routerModels():
     Returns:
         An OpenAI-style list with each model's status, gpus, and live ports
     """
-    r = getRouter()
-    loaded = await r.getLoadedModels()
+    r = get_router()
+    loaded = await r.get_loaded_models()
     return {
         "object": "list",
         "data": [
@@ -362,7 +362,7 @@ async def routerModels():
                 "id": mid,
                 "status": {"value": "loaded" if mid in loaded else "unloaded"},
                 "gpus": r.model_gpus.get(mid, [0]),
-                "ports": r.modelPorts(mid),
+                "ports": r.model_ports(mid),
             }
             for mid in r.router_config["LLM"]
         ],
@@ -378,7 +378,7 @@ async def v1Models():
     Returns:
         An OpenAI-style list of the configured model ids
     """
-    r = getRouter()
+    r = get_router()
     created = int(time.time())
     return {
         "object": "list",
@@ -394,7 +394,7 @@ async def v1Models():
     }
 
 @app.get("/router/gpu")
-async def routerGpu():
+async def router_gpu():
     """Returns per-GPU utilization and VRAM history for every detected GPU."""
     if gpu_monitor is None:
         empty: list[GpuSnapshot] = []
@@ -402,7 +402,7 @@ async def routerGpu():
     return {"gpus": gpu_monitor.snapshot()}
 
 @app.get("/router/status_timeline")
-async def routerStatusTimeline():
+async def router_status_timeline():
     """Returns the per-GPU router status change timeline ({gpu: [[ts, status], ...]})."""
     if status_timeline is None:
         empty: dict[str, list[tuple[float, str]]] = {}
@@ -412,7 +412,7 @@ async def routerStatusTimeline():
 # Translation
 
 @app.get("/translate")
-async def translatePage():
+async def translate_page():
     """
     Serves the translation single-page app
 
@@ -425,7 +425,7 @@ async def translatePage():
     return HTMLResponse(html_path.read_text())
 
 @app.get("/router/languages")
-async def routerLanguages(lang: str | None = None):
+async def router_languages(lang: str | None = None):
     """
     Returns the language list, optionally filtered by language name
 
@@ -437,10 +437,10 @@ async def routerLanguages(lang: str | None = None):
     """
     if translation_service is None:
         raise HTTPException(status_code=503, detail="Translation service not available")
-    return translation_service.getLanguages(lang)
+    return translation_service.get_languages(lang)
 
 @app.post("/router/translate")
-async def routerTranslate(request: Request):
+async def router_translate(request: Request):
     """
     Translates text with a model routed through the request queue
 
@@ -453,7 +453,7 @@ async def routerTranslate(request: Request):
     Raises:
         HTTPException: 503 if translation is unavailable, 422 on bad fields, 404 on unknown model
     """
-    r = getRouter()
+    r = get_router()
     if translation_service is None:
         raise HTTPException(status_code=503, detail="Translation service not available")
 
@@ -474,7 +474,7 @@ async def routerTranslate(request: Request):
     if target_id not in translation_service.lang_map:
         raise HTTPException(status_code=422, detail=f"Invalid target language: {target_id}")
 
-    messages = translation_service.buildMessages(source_id, target_id, text, additionals)
+    messages = translation_service.build_messages(source_id, target_id, text, additionals)
 
     envelope: Envelope = {
         "path": "/v1/chat/completions",
@@ -492,12 +492,12 @@ async def routerTranslate(request: Request):
         "is_streaming": is_streaming,
     }
 
-    future = await r.addRequest(envelope)
+    future = await r.add_request(envelope)
     result = await future
 
     if is_streaming:
         queue = cast("asyncio.Queue[bytes | Exception | None]", result)
-        async def streamChunks():
+        async def stream_chunks():
             while True:
                 chunk = await queue.get()
                 if chunk is None:
@@ -505,7 +505,7 @@ async def routerTranslate(request: Request):
                 if isinstance(chunk, Exception):
                     raise chunk
                 yield chunk
-        return StreamingResponse(streamChunks(), media_type="text/event-stream")
+        return StreamingResponse(stream_chunks(), media_type="text/event-stream")
     else:
         response = cast(httpx.Response, result)
         return JSONResponse(content=response.json(), status_code=response.status_code)
@@ -527,7 +527,7 @@ async def proxy(full_path: str, request: Request):
     Returns:
         A streaming, JSON, or raw response mirroring the upstream reply
     """
-    r = getRouter()
+    r = get_router()
     if r.status.value in ["inactive", "error"]:
         return JSONResponse(
             status_code=503,
@@ -580,7 +580,7 @@ async def proxy(full_path: str, request: Request):
     is_streaming = envelope.get("is_streaming", False)
 
     # enqueue and await result
-    future = await r.addRequest(envelope)
+    future = await r.add_request(envelope)
     try:
         result = await future
     except Exception as e:
@@ -596,7 +596,7 @@ async def proxy(full_path: str, request: Request):
 
     if is_streaming:
         queue = cast("asyncio.Queue[bytes | Exception | None]", result)
-        async def streamChunks():
+        async def stream_chunks():
             while True:
                 chunk = await queue.get()
                 if chunk is None:
@@ -604,7 +604,7 @@ async def proxy(full_path: str, request: Request):
                 if isinstance(chunk, Exception):
                     raise chunk
                 yield chunk
-        return StreamingResponse(streamChunks(), media_type="text/event-stream")
+        return StreamingResponse(stream_chunks(), media_type="text/event-stream")
     else:
         response = cast(httpx.Response, result)
         content_type = cast(str, response.headers.get("Content-Type", ""))

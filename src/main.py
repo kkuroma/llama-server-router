@@ -31,7 +31,7 @@ async def _shutdown(router: LLMRouter):
     print("[main] all instances stopped.", flush=True)
 
 
-def _printStatus(router: LLMRouter):
+def _print_status(router: LLMRouter):
     """
     Prints the router's listening port, status, and live instance ports
 
@@ -53,8 +53,8 @@ async def main():
     """
     router = LLMRouter(ROUTER_CONFIG_PATH, LLAMA_PRESETS_PATH)
     await router.start()
-    await router.initHistoryDb()
-    _printStatus(router)
+    await router.init_history_db()
+    _print_status(router)
     api.router = router
 
     # GPU + status monitoring
@@ -79,26 +79,26 @@ async def main():
     except Exception as exc:
         print(f"[main] Translation service unavailable: {exc}", flush=True)
 
-    async def _monitorLoop():
+    async def _monitor_loop():
         """Polls GPU stats and records router status every second."""
         while True:
             if gpu_monitor:
                 await asyncio.to_thread(gpu_monitor.poll)
-            status_timeline.record(router.gpuStatuses())
+            status_timeline.record(router.gpu_statuses())
             await asyncio.sleep(1.0)
 
-    asyncio.create_task(_monitorLoop())
+    asyncio.create_task(_monitor_loop())
 
     loop = asyncio.get_event_loop()
 
-    async def _signalHandler():
+    async def _signal_handler():
         """Runs cleanup and stops the event loop on a shutdown signal."""
         print("\n[main] received shutdown signal", flush=True)
         await _shutdown(router)
         loop.stop()
 
     for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, lambda: asyncio.ensure_future(_signalHandler()))
+        loop.add_signal_handler(sig, lambda: asyncio.ensure_future(_signal_handler()))
 
     api_port = router.router_config.get("API-port", 8000)
     config = uvicorn.Config(app=api.app, host=ROUTER_HOST, port=api_port, log_level="info")
