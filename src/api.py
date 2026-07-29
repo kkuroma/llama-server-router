@@ -18,6 +18,8 @@ app = FastAPI()
 # Shared web UI assets (fonts + design-language CSS/JS) for /dash and /translate.
 # Mounted before the catch-all proxy so /webui/* is served locally, not forwarded.
 app.mount("/webui", StaticFiles(directory=Path(__file__).parent / "webui"), name="webui")
+# Dashboard page assets (its own CSS/JS), same reason.
+app.mount("/dash/assets", StaticFiles(directory=Path(__file__).parent / "dash" / "assets"), name="dash-assets")
 router: LLMRouter | None = None
 gpu_monitor: GPUMonitor | None = None  # set by main.py
 status_timeline: StatusTimeline | None = None  # set by main.py

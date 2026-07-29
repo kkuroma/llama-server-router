@@ -13,6 +13,10 @@ Run it:
 
     python frontend-demo/launch.py           # -> http://127.0.0.1:11500/dash
 
+Frontend edits under ../src (.html/.css/.js) auto-refresh any open demo page:
+served pages long-poll /__reload and reload when the watcher sees an mtime
+change. Only python edits (this file, mock_data.py) still need a rerun.
+
 Env knobs:
     DEMO_PORT   listen port                 (default 11500)
     DEMO_HOST   listen host                 (default 127.0.0.1)
@@ -72,6 +76,9 @@ class Sim:
         self.serving_until: dict[int, float] = {g["index"]: 0.0 for g in MD.GPUS}
         self.util_history: dict[int, list] = {g["index"]: [] for g in MD.GPUS}
         self.vram_history: dict[int, list] = {g["index"]: [] for g in MD.GPUS}
+        self.temp_history: dict[int, list] = {g["index"]: [] for g in MD.GPUS}
+        self.power_history: dict[int, list] = {g["index"]: [] for g in MD.GPUS}
+        self._temp: dict[int, float] = {g["index"]: 40.0 for g in MD.GPUS}
         self.timeline: dict[int, list] = {}                  # gpu -> [(ts, status)]
         self._last_status: dict[int, str] = {}
         self.history: list[dict] = []                        # request rows, newest last
@@ -101,13 +108,17 @@ class Sim:
             self._add_history_row(now - age)
         self.history.sort(key=lambda r: r["request_time"])
 
-        # Backfill GPU util/VRAM history across the 2h window at flush cadence.
+        # Backfill GPU telemetry across the 2h window at flush cadence.
         t = now - GPU_WINDOW
         while t < now:
             for g in MD.GPUS:
                 gi = g["index"]
-                self.util_history[gi].append((round(t, 1), round(random.uniform(2, 18), 1)))
+                util = random.uniform(2, 18)
+                temp, power = self._telemetry_for(gi, util)
+                self.util_history[gi].append((round(t, 1), round(util, 1)))
                 self.vram_history[gi].append((round(t, 1), round(self._vram_for(gi) + random.uniform(-120, 120), 1)))
+                self.temp_history[gi].append((round(t, 1), temp))
+                self.power_history[gi].append((round(t, 1), power))
             t += GPU_FLUSH
         self._last_flush = now
         # Prime the timeline so every lane starts labeled.
@@ -135,6 +146,20 @@ class Sim:
         for mid in self.swaps:
             out.update(self.by_id[mid]["gpus"])
         return out
+
+    def _telemetry_for(self, gpu: int, util: float) -> tuple[float, float]:
+        """Fabricates a (temp_c, power_w) pair consistent with a util sample.
+
+        Temp is a first-order lag toward a util-derived target (~38C idle,
+        ~82C flat out) so it ramps and cools smoothly; power tracks util
+        toward ~90% of the card's limit with sensor noise."""
+        limit = next(g["power_limit_w"] for g in MD.GPUS if g["index"] == gpu)
+        prev = self._temp.get(gpu, 40.0)
+        target = 38.0 + (util / 100.0) * 44.0
+        temp = prev + (target - prev) * 0.25 + random.uniform(-0.8, 0.8)
+        self._temp[gpu] = temp
+        power = 22.0 + (util / 100.0) * (limit * 0.9 - 22.0) + random.uniform(-8, 8)
+        return round(temp, 1), round(max(power, 8.0), 1)
 
     def _vram_for(self, gpu: int) -> float:
         """Baseline resident VRAM (MB) on a GPU from the models loaded on it."""
@@ -248,7 +273,7 @@ class Sim:
             if len(self.history) > 6000:
                 self.history = [r for r in self.history if r["request_time"] > cutoff]
 
-            # 5) flush a GPU util/VRAM sample on cadence.
+            # 5) flush a GPU telemetry sample on cadence.
             if now - self._last_flush >= GPU_FLUSH:
                 self._last_flush = now
                 swapping = self._swapping_gpus()
@@ -262,10 +287,13 @@ class Sim:
                         util = random.uniform(25, 70)
                     else:
                         util = random.uniform(1, 9)
+                    temp, power = self._telemetry_for(gi, util)
                     self.util_history[gi].append((round(now, 1), round(util, 1)))
                     self.vram_history[gi].append((round(now, 1), round(self._vram_for(gi) + random.uniform(-100, 100), 1)))
-                    self.util_history[gi] = [(t, v) for t, v in self.util_history[gi] if t > gcut]
-                    self.vram_history[gi] = [(t, v) for t, v in self.vram_history[gi] if t > gcut]
+                    self.temp_history[gi].append((round(now, 1), temp))
+                    self.power_history[gi].append((round(now, 1), power))
+                    for hist in (self.util_history, self.vram_history, self.temp_history, self.power_history):
+                        hist[gi] = [(t, v) for t, v in hist[gi] if t > gcut]
 
             # 6) record status transitions for the timeline lanes.
             self._record_timeline(now)
@@ -332,8 +360,11 @@ class Sim:
                         "index": g["index"],
                         "name": g["name"],
                         "total_vram_mb": g["total_vram_mb"],
+                        "power_limit_w": g["power_limit_w"],
                         "util_history": list(self.util_history[g["index"]]),
                         "vram_history": list(self.vram_history[g["index"]]),
+                        "temp_history": list(self.temp_history[g["index"]]),
+                        "power_history": list(self.power_history[g["index"]]),
                     }
                     for g in MD.GPUS
                 ]
@@ -400,6 +431,65 @@ def sim_loop():
         time.sleep(1.0)
 
 
+# --- live reload -----------------------------------------------------------
+# Frontend edits under ../src auto-refresh open pages: a watcher thread bumps a
+# version when any .html/.css/.js mtime changes, pages long-poll /__reload and
+# location.reload() when the version moves. The version starts at the launch
+# timestamp, so a script restart also differs from whatever clients last saw
+# and reconnecting pages refresh themselves.
+
+RELOAD_EXTS = (".html", ".css", ".js")
+RELOAD_POLL = 0.5      # seconds between mtime scans
+RELOAD_HOLD = 30.0     # max seconds a /__reload long-poll is held
+
+_reload_cond = threading.Condition()
+_reload_version = int(time.time())
+
+
+def _frontend_state():
+    """Snapshot of every frontend file's mtime under ../src."""
+    return {
+        str(p): p.stat().st_mtime
+        for p in SRC.rglob("*")
+        if p.suffix in RELOAD_EXTS and p.is_file()
+    }
+
+
+def watch_loop():
+    """Bumps the reload version whenever a frontend file changes on disk."""
+    global _reload_version
+    state = _frontend_state()
+    while True:
+        time.sleep(RELOAD_POLL)
+        try:
+            now = _frontend_state()
+        except OSError:
+            continue  # a file vanished mid-scan (editor atomic save); retry
+        if now != state:
+            state = now
+            with _reload_cond:
+                _reload_version += 1
+                _reload_cond.notify_all()
+
+
+RELOAD_SCRIPT = """<script>
+(function () {
+  var v = null;
+  function poll() {
+    fetch('/__reload' + (v === null ? '' : '?v=' + v))
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (v !== null && d.version !== v) { location.reload(); return; }
+        v = d.version;
+        poll();
+      })
+      .catch(function () { setTimeout(poll, 1000); });
+  }
+  poll();
+})();
+</script>"""
+
+
 # Minimal placeholder served for the /chat iframe (there is no real llama.cpp UI
 # behind these ports in the demo). Keeps the tab structure/embedding exercised.
 INSTANCE_PAGE = """<!doctype html><html><head><meta charset=utf-8>
@@ -459,11 +549,17 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _spa(self, page: str):
-        """Serves one of the real SPA index.html files from ../src."""
+        """Serves one of the real SPA index.html files from ../src, with the
+        live-reload client injected."""
         html = SRC / page / "index.html"
         if not html.exists():
             return self._json({"error": f"{page} not found"}, 404)
-        return self._html(html.read_text())
+        text = html.read_text()
+        if "</body>" in text:
+            text = text.replace("</body>", RELOAD_SCRIPT + "\n</body>", 1)
+        else:
+            text += RELOAD_SCRIPT
+        return self._html(text)
 
     # --- routing -----------------------------------------------------------
 
@@ -477,10 +573,21 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Location", "/dash")
             self.end_headers()
             return
+        if p == "/__reload":
+            # Immediate answer when the client's version is stale or absent;
+            # otherwise hold until a change (or the poll timeout) and re-answer.
+            want = q.get("v", [None])[0]
+            with _reload_cond:
+                if want == str(_reload_version):
+                    _reload_cond.wait(RELOAD_HOLD)
+                version = _reload_version
+            return self._json({"version": version})
         if p in ("/dash", "/chat", "/translate"):
             return self._spa(p.lstrip("/"))
         if p.startswith("/webui/"):
             return self._file(SRC / "webui" / p[len("/webui/"):])
+        if p.startswith("/dash/assets/"):
+            return self._file(SRC / "dash" / "assets" / p[len("/dash/assets/"):])
 
         # --- router API ---
         if p == "/router":
@@ -589,8 +696,10 @@ def _f(v):
 def main():
     """Starts the sim thread and serves the demo until interrupted."""
     threading.Thread(target=sim_loop, daemon=True).start()
+    threading.Thread(target=watch_loop, daemon=True).start()
     httpd = ThreadingHTTPServer((HOST, PORT), Handler)
     print(f"[demo] frontend demo on http://{HOST}:{PORT}/dash", flush=True)
+    print(f"[demo] live reload: watching {SRC} for {'/'.join(RELOAD_EXTS)}", flush=True)
     print(f"[demo] {len(MD.GPUS)} GPUs · {len(MD.MODELS)} models · auto={'on' if AUTO else 'off'}", flush=True)
     try:
         httpd.serve_forever()

@@ -14,10 +14,10 @@ believable enough to exercise every dashboard widget.
 # chart's y-axis and the "near cap" red line; deliberately mixed sizes so the
 # per-GPU selector, legend and VRAM scaling all get exercised.
 GPUS = [
-    {"index": 0, "name": "NVIDIA GeForce RTX 4080 SUPER", "total_vram_mb": 16376},
-    {"index": 1, "name": "NVIDIA GeForce RTX 4090",       "total_vram_mb": 24564},
-    {"index": 2, "name": "NVIDIA GeForce RTX 4080 SUPER", "total_vram_mb": 16376},
-    {"index": 3, "name": "NVIDIA GeForce RTX 3090",       "total_vram_mb": 24576},
+    {"index": 0, "name": "NVIDIA GeForce RTX 4080 SUPER", "total_vram_mb": 16376, "power_limit_w": 320},
+    {"index": 1, "name": "NVIDIA GeForce RTX 4090",       "total_vram_mb": 24564, "power_limit_w": 450},
+    {"index": 2, "name": "NVIDIA GeForce RTX 4080 SUPER", "total_vram_mb": 16376, "power_limit_w": 320},
+    {"index": 3, "name": "NVIDIA GeForce RTX 3090",       "total_vram_mb": 24576, "power_limit_w": 350},
 ]
 
 # Configured models. `gpus` is the fixed placement (must reference indices in
