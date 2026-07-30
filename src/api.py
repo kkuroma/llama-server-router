@@ -382,18 +382,24 @@ async def v1_models():
     """
     r = get_router()
     created = int(time.time())
-    return {
-        "object": "list",
-        "data": [
-            {
-                "id": mid,
-                "object": "model",
-                "created": created,
-                "owned_by": "llama-router",
-            }
-            for mid in r.router_config["LLM"]
-        ],
-    }
+    windows = r.model_context_windows()
+    data = []
+    for mid in r.router_config["LLM"]:
+        entry = {
+            "id": mid,
+            "object": "model",
+            "created": created,
+            "owned_by": "llama-router",
+        }
+        # Advertise the effective per-request context (c / parallel) so clients
+        # like OpenCode/LibreChat can size prompts. context_length is the common
+        # field; meta.n_ctx(_train) mirrors what llama.cpp's own /v1/models emits.
+        ctx = windows.get(mid)
+        if ctx is not None:
+            entry["context_length"] = ctx
+            entry["meta"] = {"n_ctx_train": ctx, "n_ctx": ctx}
+        data.append(entry)
+    return {"object": "list", "data": data}
 
 @app.get("/router/gpu")
 async def router_gpu():

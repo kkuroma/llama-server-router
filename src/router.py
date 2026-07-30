@@ -1,4 +1,5 @@
 import asyncio
+import configparser
 import json
 import os
 import subprocess
@@ -215,6 +216,7 @@ class LLMRouter:
         }
         self.model_loaded_at: dict[str, float] = {} # model -> ts of last successful load
         self.model_last_used: dict[str, float] = {} # model -> ts of last dispatched request (or load)
+        self._context_windows: dict[str, int] | None = None # cached per-model effective context (see model_context_windows)
 
         self.status: Status = Status.INACTIVE
         self.processes: dict[int, subprocess.Popen[bytes]] = {} # port -> Popen
@@ -417,6 +419,54 @@ class LLMRouter:
             print(f"[ROUTER] {model_id}: no valid gpu ids, defaulting to [0]", flush=True)
             return [0]
         return sorted(ids)
+
+    def model_context_windows(self) -> dict[str, int]:
+        """
+        Returns the effective per-request context window for each configured model
+
+        Reads ctx-size ("c") and "parallel" from the presets INI (falling back to
+        the "[*]" global section) and returns floor(c / parallel) per model, since
+        llama.cpp splits the total KV context "-c" evenly across the "--parallel"
+        slots, so a single request sees only c / parallel tokens (parallel defaults
+        to 1 when unset). Models whose "c" cannot be resolved are omitted. The
+        presets file is parsed once and the result cached.
+
+        Returns:
+            A dict mapping model id to its effective per-slot context in tokens
+        """
+        if self._context_windows is not None:
+            return self._context_windows
+
+        windows: dict[str, int] = {}
+        parser = configparser.ConfigParser(inline_comment_prefixes=("#", ";"), strict=False)
+        try:
+            read = parser.read(self.llama_presets_path)
+        except configparser.Error as exc:
+            print(f"[ROUTER] could not parse presets {self.llama_presets_path!r}: {exc}", flush=True)
+            read = []
+
+        if read:
+            def _preset_value(model_id: str, key: str) -> str | None:
+                if parser.has_option(model_id, key):
+                    return parser.get(model_id, key)
+                if parser.has_option("*", key):
+                    return parser.get("*", key)
+                return None
+
+            for model_id in self.router_config["LLM"]:
+                raw_c = _preset_value(model_id, "c")
+                if raw_c is None:
+                    continue
+                raw_parallel = _preset_value(model_id, "parallel")
+                try:
+                    ctx = int(raw_c)
+                    parallel = int(raw_parallel) if raw_parallel is not None else 1
+                except ValueError:
+                    continue
+                windows[model_id] = ctx // max(parallel, 1)
+
+        self._context_windows = windows
+        return windows
 
     def _plan_evictions(self, model_id: str, loaded: set[str]) -> set[str]:
         """
