@@ -220,6 +220,14 @@ class LLMRouter:
 
         self.status: Status = Status.INACTIVE
         self.processes: dict[int, subprocess.Popen[bytes]] = {} # port -> Popen
+        # Bare metadata supervisor: a --no-models-autoload llama-server on a
+        # reserved port with no GPU mask, alive ONLY while zero replicas are
+        # loaded, so /v1/models always has a real llama.cpp process to proxy
+        # (see models_report / _reconcile_idle_supervisor). Kept out of
+        # self.processes so it never counts as a loaded replica.
+        self._idle_port: int = self.router_config["LLM-base-port"] - 1
+        self._idle_proc: subprocess.Popen[bytes] | None = None
+        self._idle_lock = asyncio.Lock()
         self.port_model: dict[int, str] = {} # port -> model_id hosted by that process (set once loaded)
         self.inflight: dict[int, int] = {} # port -> requests currently being forwarded
         self._last_load_error: str | None = None # reason the most recent load attempt failed (e.g. worker OOM)
@@ -896,6 +904,9 @@ class LLMRouter:
         self._running = True
         self._scheduler_task = asyncio.create_task(self._scheduler())
         self.status = Status.IDLE
+        # Nothing is loaded yet, so bring up the idle metadata supervisor so
+        # /v1/models can proxy a real llama.cpp process from the first request on.
+        await self._reconcile_idle_supervisor()
         print(f"[START SUCCESS] Router started, replicas spawn on demand")
 
     async def stop(self):
@@ -921,6 +932,7 @@ class LLMRouter:
             fut = entry.get("future")
             if fut and not fut.done():
                 fut.set_exception(RuntimeError("Router is stopping"))
+        await self._kill_idle_supervisor()
         results = await asyncio.gather(
             *[self._kill_instance(port) for port in list(self.processes.keys())],
             return_exceptions=True,
@@ -1043,6 +1055,7 @@ class LLMRouter:
             self._swapping_gpus.difference_update(affected)
             await self._release_exclusive(affected)
             self._has_requests.set()
+            await self._reconcile_idle_supervisor()
 
     async def unload_model(self, model_id: str):
         """
@@ -1066,6 +1079,164 @@ class LLMRouter:
             self._swapping_gpus.difference_update(gpus)
             await self._release_exclusive(gpus)
             self._has_requests.set()
+            await self._reconcile_idle_supervisor()
+
+    # Idle metadata supervisor
+
+    async def _start_idle_supervisor(self) -> bool:
+        """
+        Spawns the bare metadata supervisor (no model, no GPU) on the reserved port
+
+        A llama-server started with --no-models-autoload and an empty GPU mask
+        loads no weights and holds no VRAM, but still serves /v1/models and /props
+        for the whole preset. It exists only while the router has zero replicas
+        loaded, so /v1/models can proxy a real llama.cpp process (models_report)
+        instead of the router fabricating the listing. It is killed the moment a
+        real model loads (see _reconcile_idle_supervisor).
+
+        Returns:
+            True once the supervisor answers /v1/models, otherwise False
+        """
+        if self._idle_proc is not None and self._idle_proc.poll() is None:
+            return True
+        port = self._idle_port
+        exe = self.router_config["llama-server-executable"]
+        env = dict(os.environ)
+        env["CUDA_VISIBLE_DEVICES"] = "" # no visible GPUs -> pure metadata daemon
+        env["HIP_VISIBLE_DEVICES"] = ""
+        print(f"[ROUTER] starting idle metadata supervisor at port {port} (no model, no gpu)...", flush=True)
+        proc = subprocess.Popen(
+            [exe, "--host", "0.0.0.0", "--port", str(port),
+             "--models-preset", self.llama_presets_path, "--no-models-autoload", "--metrics"],
+            stdout=None, # inherit router's fds -> journald
+            stderr=None,
+            env=env,
+        )
+        self._idle_proc = proc
+        deadline = asyncio.get_event_loop().time() + self.HEALTH_CHECK_TIMEOUT
+        async with httpx.AsyncClient() as client:
+            while asyncio.get_event_loop().time() < deadline:
+                if proc.poll() is not None:
+                    print(f"[ROUTER] idle supervisor exited (code {proc.returncode}) before ready", flush=True)
+                    self._idle_proc = None
+                    return False
+                try:
+                    # /v1/models is served by a router-role server regardless of
+                    # whether any model is loaded, so it doubles as the readiness probe.
+                    resp = await client.get(f"http://127.0.0.1:{port}/v1/models", timeout=2.0)
+                    if resp.status_code == 200:
+                        print(f"[ROUTER] idle metadata supervisor ready at port {port}", flush=True)
+                        return True
+                except (httpx.ConnectError, httpx.TimeoutException):
+                    pass
+                await asyncio.sleep(self.HEALTH_CHECK_INTERVAL)
+        print(f"[ROUTER] idle supervisor never became ready within {self.HEALTH_CHECK_TIMEOUT}s; killing", flush=True)
+        proc.kill()
+        self._idle_proc = None
+        return False
+
+    async def _kill_idle_supervisor(self) -> None:
+        """Stops the idle metadata supervisor if running (SIGTERM, then SIGKILL)."""
+        proc = self._idle_proc
+        if proc is None:
+            return
+        self._idle_proc = None
+        try:
+            if proc.poll() is None:
+                print(f"[ROUTER] stopping idle metadata supervisor at port {self._idle_port}...", flush=True)
+                proc.terminate()
+                await asyncio.sleep(self.GRACEFUL_KILL_TIMEOUT)
+                if proc.poll() is None:
+                    proc.kill()
+            proc.wait()
+        except Exception:
+            pass
+
+    async def _reconcile_idle_supervisor(self) -> None:
+        """
+        Keeps the idle metadata supervisor alive iff no real replica is loaded
+
+        Runs the supervisor while the router has zero replicas (so /v1/models can
+        still proxy a real llama.cpp process) and kills it as soon as any real
+        model is resident, since a live replica is a better proxy source and a
+        second supervisor would be redundant. Idempotent and serialized by
+        _idle_lock so overlapping load/unload transitions can't race it.
+        """
+        async with self._idle_lock:
+            self._reap_dead()
+            try:
+                if self._loaded_models():
+                    await self._kill_idle_supervisor()
+                else:
+                    await self._start_idle_supervisor()
+            except Exception as exc:
+                # The idle supervisor is best-effort (models_report falls back to a
+                # synthesized listing); never let it break a load/unload/start.
+                print(f"[ROUTER] idle supervisor reconcile failed: {exc}", flush=True)
+
+    def _proxy_port(self) -> int | None:
+        """
+        Picks a live llama.cpp supervisor port to proxy metadata from
+
+        Prefers a real loaded replica (it also carries rich per-model meta), and
+        falls back to the idle metadata supervisor. Returns None if neither is up.
+
+        Returns:
+            A port hosting a live llama.cpp server, or None
+        """
+        for port in sorted(self.processes):
+            if self.processes[port].poll() is None:
+                return port
+        if self._idle_proc is not None and self._idle_proc.poll() is None:
+            return self._idle_port
+        return None
+
+    async def models_report(self) -> dict[str, Any]:
+        """
+        Builds the /v1/models listing, proxying a live llama.cpp server when possible
+
+        Proxies /v1/models from a live supervisor (a loaded replica, else the idle
+        metadata supervisor) so the listing carries llama.cpp's real fields
+        (modalities, source, and per-model meta for whatever is loaded), then
+        overlays our per-request context_length (c / parallel) since llama.cpp
+        does not report that. Falls back to a synthesized listing (ids +
+        context_length) when no supervisor is reachable.
+
+        Returns:
+            An OpenAI-style {"object": "list", "data": [...]} dict
+        """
+        windows = self.model_context_windows()
+        configured = list(self.router_config["LLM"])
+        port = self._proxy_port()
+        if port is not None:
+            try:
+                async with httpx.AsyncClient() as client:
+                    resp = await client.get(f"http://127.0.0.1:{port}/v1/models", timeout=5.0)
+                if resp.status_code == 200:
+                    upstream = {row["id"]: row for row in resp.json().get("data", []) if "id" in row}
+                    data = []
+                    for mid in configured:
+                        row = dict(upstream.get(mid, {"id": mid, "object": "model"}))
+                        ctx = windows.get(mid)
+                        if ctx is not None:
+                            # per-request usable context; llama.cpp omits this and
+                            # its meta.n_ctx (when loaded) is the total -c pool.
+                            row["context_length"] = ctx
+                        data.append(row)
+                    return {"object": "list", "data": data}
+            except (httpx.HTTPError, ValueError) as exc:
+                print(f"[ROUTER] models_report proxy from port {port} failed: {exc}; synthesizing", flush=True)
+        # Fallback: synthesize from config + presets (no live supervisor).
+        created = int(time.time())
+        data = []
+        for mid in configured:
+            entry: dict[str, Any] = {"id": mid, "object": "model", "created": created, "owned_by": "llama-router"}
+            ctx = windows.get(mid)
+            if ctx is not None:
+                entry["context_length"] = ctx
+                entry["meta"] = {"n_ctx_train": ctx, "n_ctx": ctx}
+            data.append(entry)
+        return {"object": "list", "data": data}
 
     # Request handling
 

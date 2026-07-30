@@ -1,7 +1,6 @@
 import asyncio
 import json
 import re
-import time
 from pathlib import Path
 from typing import TypedDict, cast
 
@@ -373,33 +372,17 @@ async def router_models():
 @app.get("/v1/models")
 async def v1_models():
     """
-    Returns an OpenAI-compatible model listing served by the router itself
+    Returns an OpenAI-compatible model listing with per-request context windows
 
-    Works even when no llama-server replica is running
+    Proxies a live llama.cpp supervisor (a loaded replica, else the always-on
+    idle metadata supervisor) for the real fields, overlaying our per-request
+    context_length. Falls back to a synthesized listing (ids + context_length)
+    when no supervisor is reachable, so it works even with nothing loaded.
 
     Returns:
-        An OpenAI-style list of the configured model ids
+        An OpenAI-style {"object": "list", "data": [...]} dict
     """
-    r = get_router()
-    created = int(time.time())
-    windows = r.model_context_windows()
-    data = []
-    for mid in r.router_config["LLM"]:
-        entry = {
-            "id": mid,
-            "object": "model",
-            "created": created,
-            "owned_by": "llama-router",
-        }
-        # Advertise the effective per-request context (c / parallel) so clients
-        # like OpenCode/LibreChat can size prompts. context_length is the common
-        # field; meta.n_ctx(_train) mirrors what llama.cpp's own /v1/models emits.
-        ctx = windows.get(mid)
-        if ctx is not None:
-            entry["context_length"] = ctx
-            entry["meta"] = {"n_ctx_train": ctx, "n_ctx": ctx}
-        data.append(entry)
-    return {"object": "list", "data": data}
+    return await get_router().models_report()
 
 @app.get("/router/gpu")
 async def router_gpu():
