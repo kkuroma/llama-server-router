@@ -424,12 +424,14 @@ class LLMRouter:
         """
         Returns the effective per-request context window for each configured model
 
-        Reads ctx-size ("c") and "parallel" from the presets INI (falling back to
-        the "[*]" global section) and returns floor(c / parallel) per model, since
-        llama.cpp splits the total KV context "-c" evenly across the "--parallel"
-        slots, so a single request sees only c / parallel tokens (parallel defaults
-        to 1 when unset). Models whose "c" cannot be resolved are omitted. The
-        presets file is parsed once and the result cached.
+        Reads ctx-size and the parallel-slot count from the presets INI (each
+        accepting llama.cpp's long or short spelling: "c"/"ctx-size" and
+        "np"/"parallel"), falling back to the "[*]" global section, and returns
+        floor(ctx / parallel) per model, since llama.cpp splits the total KV
+        context "-c" evenly across the "--parallel" slots, so a single request
+        sees only ctx / parallel tokens (parallel defaults to 1 when unset).
+        Models whose ctx-size cannot be resolved are omitted. The presets file is
+        parsed once and the result cached.
 
         Returns:
             A dict mapping model id to its effective per-slot context in tokens
@@ -446,18 +448,19 @@ class LLMRouter:
             read = []
 
         if read:
-            def _preset_value(model_id: str, key: str) -> str | None:
-                if parser.has_option(model_id, key):
-                    return parser.get(model_id, key)
-                if parser.has_option("*", key):
-                    return parser.get("*", key)
+            def _preset_value(model_id: str, keys: tuple[str, ...]) -> str | None:
+                # per-model overrides the [*] global; either key spelling wins.
+                for section in (model_id, "*"):
+                    for key in keys:
+                        if parser.has_option(section, key):
+                            return parser.get(section, key)
                 return None
 
             for model_id in self.router_config["LLM"]:
-                raw_c = _preset_value(model_id, "c")
+                raw_c = _preset_value(model_id, ("c", "ctx-size"))
                 if raw_c is None:
                     continue
-                raw_parallel = _preset_value(model_id, "parallel")
+                raw_parallel = _preset_value(model_id, ("np", "parallel"))
                 try:
                     ctx = int(raw_c)
                     parallel = int(raw_parallel) if raw_parallel is not None else 1
