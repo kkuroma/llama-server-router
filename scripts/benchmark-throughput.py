@@ -355,7 +355,7 @@ def writeReport(data: dict, path: str) -> None:
     ]
     for model, row in data["results"].items():
         if "error" in row:
-            lines.append(f"| {model} | — | — | error: {row['error'][:60]} |")
+            lines.append(f"| {model} | - | - | error: {row['error'][:60]} |")
             continue
         for level in sorted(row["concurrency"], key=int):
             cur = row["concurrency"][level]

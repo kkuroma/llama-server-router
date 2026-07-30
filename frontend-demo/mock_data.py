@@ -1,7 +1,7 @@
 """
 Static fake-fleet definition for the frontend demo harness.
 
-This is pure data — no logic. `launch.py` reads it to synthesize the router API
+This is pure data, no logic. `launch.py` reads it to synthesize the router API
 the real SPAs poll (`/router`, `/router/models`, `/router/gpu`, ...). Edit the
 lists here to stress different shapes: more GPUs, wider VRAM spreads, longer
 model names, MoE active-param tags, models with no size token, etc.
@@ -50,7 +50,7 @@ MODELS = [
 # time. Must be a subset of MODELS ids with non-overlapping GPUs.
 INITIAL_LOADED = ["wordslop-qwen-3-6-27b", "gemma-4-12b", "phi-4-mini-3.8b-instruct"]
 
-# Scheduler knobs echoed back on /router (cosmetic — the dashboard displays them
+# Scheduler knobs echoed back on /router (cosmetic: the dashboard displays them
 # but the sim enforces its own single-model-per-GPU residency regardless).
 MAX_MODELS_PER_GPU = 1
 EVICTION_POLICY = "lru"

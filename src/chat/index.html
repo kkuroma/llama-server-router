@@ -25,9 +25,8 @@
       font-size: 0.8rem; transition: background 0.15s, color 0.15s;
     }
     .chat-tab:hover { background: var(--surface1); }
-    /* Model load/unload chips: daisyUI's btn-ghost hover tints with base-content
-       (white in dark themes) — the same token as the label — so the text washes
-       out to white-on-white. Pin hover to surface tokens for readable contrast. */
+    /* btn-ghost hover tints with base-content, the same token as the label, so
+       pin hover to surface tokens for readable contrast. */
     .model-chip.btn-ghost:hover { background: var(--surface1); color: var(--text); }
     .chat-tab.active { background: var(--surface1); color: var(--text); border-color: var(--overlay0); }
     /* The embedded llama.cpp UI fills the remaining space. */
@@ -204,8 +203,7 @@
         const models = ref([]);
         const loadingModels = reactive({});
 
-        // Live llama-server replicas as [{ port, model }], sorted by port — one
-        // tab / embedded UI each. Rebuilt from /router on every poll.
+        // Live replicas as [{ port, model }], one tab each, rebuilt from /router on every poll.
         const instances = ref([]);
         // Per-port reload counter, folded into the iframe src so the ↻ button can
         // force just the active instance's UI to re-fetch.

@@ -14,11 +14,7 @@ import aiosqlite
 
 HISTORY_DB_PATH = os.environ.get("HISTORY_DB_PATH", "/webui/monitor/history.db")
 
-# All available statuses. INACTIVE/STARTING/STOPPING/ERROR are router-wide
-# lifecycle states; IDLE/SERVING/SWAPPING are the running states and are tracked
-# PER GPU (a GPU is SERVING while a generation on it is in flight, SWAPPING while
-# a model is loading/unloading on it, else IDLE). self.status holds the lifecycle
-# state; per-GPU running states are computed on demand (see _gpu_status).
+# INACTIVE/STARTING/STOPPING/ERROR are router-wide lifecycle states; IDLE/SERVING/SWAPPING are per GPU.
 class Status(Enum):
     INACTIVE = "inactive" # not running
     STARTING = "starting" # during start()
@@ -77,14 +73,12 @@ class Envelope(TypedDict):
     method: str
     body: str | bytes
     headers: dict[str, str]
-    # add_request pops is_streaming, and the catch-all sets model only when known,
-    # so both are optional.
+    # add_request pops is_streaming, and model is set only when known.
     is_streaming: NotRequired[bool]
     model: NotRequired[str]
 
 
-# Streaming futures resolve with this queue: response chunks, then an Exception
-# on error, then a None sentinel. Non-streaming futures resolve with a Response.
+# Streaming futures resolve with a queue of chunks then a None sentinel, non-streaming with a Response.
 StreamQueue = asyncio.Queue[bytes | Exception | None]
 ForwardResult = httpx.Response | StreamQueue
 
@@ -206,9 +200,7 @@ class LLMRouter:
             eviction_policy = "lru"
         self.EVICTION_POLICY = eviction_policy
 
-        # GPU topology: each model is pinned to a set of GPU ids ("gpus" in its
-        # LLM entry; absent -> [0], -1/"all" -> every GPU). Residency accounting
-        # and eviction are per GPU.
+        # Each model is pinned to a set of GPU ids, so residency and eviction are per GPU.
         self.num_gpus = self._detect_num_gpus(router_settings.get("NUM_GPUS"))
         self.model_gpus: dict[str, list[int]] = {
             mid: self._resolve_gpus(mid, mcfg.get("gpus"))
@@ -220,11 +212,7 @@ class LLMRouter:
 
         self.status: Status = Status.INACTIVE
         self.processes: dict[int, subprocess.Popen[bytes]] = {} # port -> Popen
-        # Bare metadata supervisor: a --no-models-autoload llama-server on a
-        # reserved port with no GPU mask, alive ONLY while zero replicas are
-        # loaded, so /v1/models always has a real llama.cpp process to proxy
-        # (see models_report / _reconcile_idle_supervisor). Kept out of
-        # self.processes so it never counts as a loaded replica.
+        # Bare metadata supervisor, alive only while zero replicas are loaded, so /v1/models always has a real process to proxy.
         self._idle_port: int = self.router_config["LLM-base-port"] - 1
         self._idle_proc: subprocess.Popen[bytes] | None = None
         self._idle_lock = asyncio.Lock()
@@ -234,9 +222,7 @@ class LLMRouter:
         self._last_load_fatal: bool = False # True if that failure was deterministic (worker exited/failed) -> don't retry
         self.requests:  list[dict[str, Any]] = [] # [{request, future, is_streaming, request_time}, ...]
         self.request_lock = asyncio.Lock()
-        # One RWLock per GPU (generation = shared reader, load/unload = exclusive
-        # writer). GPUs are independent, so a swap on one GPU never drains work on
-        # another. self._swapping_gpus marks GPUs mid load/unload for status.
+        # One RWLock per GPU: generation takes the reader, load/unload the writer.
         self._gpu_locks: dict[int, AsyncRWLock] = {g: AsyncRWLock() for g in range(self.num_gpus)}
         self._swapping_gpus: set[int] = set()
         self._has_requests = asyncio.Event()
@@ -732,8 +718,7 @@ class LLMRouter:
         env = dict(os.environ)
         gpus = self.model_gpus.get(model_id, [0])
         mask = ",".join(str(g) for g in gpus)
-        # CUDA + HIP/ROCm both honor their own *_VISIBLE_DEVICES; set both so the
-        # mask is backend-agnostic (the unused one is simply ignored).
+        # Set both so the mask is backend-agnostic across CUDA and ROCm.
         env["CUDA_VISIBLE_DEVICES"] = mask
         env["HIP_VISIBLE_DEVICES"] = mask
         proc = subprocess.Popen(
@@ -747,9 +732,7 @@ class LLMRouter:
         deadline = asyncio.get_event_loop().time() + self.HEALTH_CHECK_TIMEOUT
         async with httpx.AsyncClient() as client:
             while asyncio.get_event_loop().time() < deadline:
-                # Fail fast if the server process died before it ever went healthy
-                # (bad preset, missing model file, immediate CUDA error) instead of
-                # polling a dead port for the full HEALTH_CHECK_TIMEOUT.
+                # Fail fast if the process died before it ever went healthy.
                 code = self._replica_exited(port)
                 if code is not None:
                     self._last_load_error = (f"{model_id} llama-server on port {port} exited "
@@ -788,8 +771,7 @@ class LLMRouter:
         except Exception as exc:
             print(f"[ROUTER] load request to port {port} failed: {exc}", flush=True)
             return False
-        # A 4xx/5xx here is a deterministic rejection (bad preset, or the worker
-        # OOM'd and the supervisor reported it synchronously) — don't retry.
+        # A 4xx/5xx here is a deterministic rejection, so don't retry.
         if resp.status_code >= 400:
             self._last_load_error = (f"{model_id} load rejected by worker on port {port} "
                                      f"(HTTP {resp.status_code}): {resp.text[:200]}")
@@ -798,17 +780,12 @@ class LLMRouter:
             return False
         deadline = asyncio.get_event_loop().time() + self.LOAD_POLL_TIMEOUT
         while asyncio.get_event_loop().time() < deadline:
-            # The worker loads asynchronously and fails on OOM (e.g. building the
-            # KV/compute buffers for a huge ctx-size). Two failure shapes, both
-            # fatal — fail fast instead of polling for the full LOAD_POLL_TIMEOUT
-            # with the GPU exclusive lock held (the silent-OOM swapping hang):
-            #   1) the whole llama-server process exits, or
-            #   2) only the model worker dies; the supervisor stays healthy but
-            #      marks the model "failed": true / "exit_code": N in /models.
+            # The worker loads asynchronously and fails on OOM, either by exiting outright or by
+            # staying up and marking the model "failed" in /models. Both are fatal.
             code = self._replica_exited(port)
             if code is not None:
                 self._last_load_error = (f"{model_id} worker on port {port} exited (code {code}) "
-                                         f"during load — likely CUDA OOM / insufficient VRAM "
+                                         f"during load, likely CUDA OOM / insufficient VRAM "
                                          f"(check the llama-server logs)")
                 self._last_load_fatal = True
                 print(f"[ROUTER] {self._last_load_error}", flush=True)
@@ -819,7 +796,7 @@ class LLMRouter:
                     return True
                 if status.get("failed") or (status.get("exit_code") not in (None, 0)):
                     self._last_load_error = (f"{model_id} worker on port {port} failed to load "
-                                             f"(exit_code {status.get('exit_code')}) — likely CUDA OOM / "
+                                             f"(exit_code {status.get('exit_code')}), likely CUDA OOM / "
                                              f"insufficient VRAM for its ctx-size (check the llama-server logs)")
                     self._last_load_fatal = True
                     print(f"[ROUTER] {self._last_load_error}", flush=True)
@@ -850,10 +827,7 @@ class LLMRouter:
                 self.port_model[port] = model_id
                 print(f"[ROUTER] replica for {model_id} up on port {port} (pid {pid})", flush=True)
                 return True
-            # A deterministic load failure (worker exited / reported "failed" /
-            # load rejected — flagged by _load_into, or the whole process died)
-            # will just hit the same wall on retry, so bail now. Only retry a
-            # transient stall (process still alive and no hard failure flagged).
+            # A deterministic load failure hits the same wall on retry, so only retry a transient stall.
             fatal = self._last_load_fatal or self._replica_exited(port) is not None
             await self._kill_instance(port)
             if fatal:
@@ -904,8 +878,7 @@ class LLMRouter:
         self._running = True
         self._scheduler_task = asyncio.create_task(self._scheduler())
         self.status = Status.IDLE
-        # Nothing is loaded yet, so bring up the idle metadata supervisor so
-        # /v1/models can proxy a real llama.cpp process from the first request on.
+        # Nothing is loaded yet, so bring up the idle metadata supervisor.
         await self._reconcile_idle_supervisor()
         print(f"[START SUCCESS] Router started, replicas spawn on demand")
 
@@ -991,10 +964,7 @@ class LLMRouter:
         if model_id not in self.router_config["LLM"]:
             raise ValueError(f"[LOAD/UNLOAD ERROR] Model [{model_id}] not present in list {list(self.router_config['LLM'].keys())}")
 
-        # Acquire the exclusive lock of every GPU this load may mutate. A
-        # concurrent load can add a co-resident between planning and locking,
-        # widening the affected set, so re-derive after acquiring and retry with
-        # the wider set (locks are always taken in ascending GPU order).
+        # Re-derive the affected GPUs after locking, since a concurrent load can widen the set.
         self._reap_dead()
         affected = self._load_affected_gpus(model_id, self._loaded_models())
         while True:
@@ -1017,8 +987,7 @@ class LLMRouter:
                 print(f"[ROUTER] models: {model_id} already present in memory")
                 return True
 
-            # 1) evict per-GPU overflow (skipped when topping up lost replicas —
-            #    the model already counts against its GPUs)
+            # 1) evict per-GPU overflow (skipped when topping up lost replicas)
             if model_id not in loaded:
                 evict = self._plan_evictions(model_id, loaded)
                 print(f"[ROUTER] models: {loaded or '{}'} present in memory, evicting {evict or 'nothing'} "
@@ -1121,8 +1090,7 @@ class LLMRouter:
                     self._idle_proc = None
                     return False
                 try:
-                    # /v1/models is served by a router-role server regardless of
-                    # whether any model is loaded, so it doubles as the readiness probe.
+                    # Served regardless of what is loaded, so it doubles as the readiness probe.
                     resp = await client.get(f"http://127.0.0.1:{port}/v1/models", timeout=2.0)
                     if resp.status_code == 200:
                         print(f"[ROUTER] idle metadata supervisor ready at port {port}", flush=True)
@@ -1170,8 +1138,7 @@ class LLMRouter:
                 else:
                     await self._start_idle_supervisor()
             except Exception as exc:
-                # The idle supervisor is best-effort (models_report falls back to a
-                # synthesized listing); never let it break a load/unload/start.
+                # Best-effort, so never let the idle supervisor break a load/unload/start.
                 print(f"[ROUTER] idle supervisor reconcile failed: {exc}", flush=True)
 
     def _proxy_port(self) -> int | None:
@@ -1219,8 +1186,7 @@ class LLMRouter:
                         row = dict(upstream.get(mid, {"id": mid, "object": "model"}))
                         ctx = windows.get(mid)
                         if ctx is not None:
-                            # per-request usable context; llama.cpp omits this and
-                            # its meta.n_ctx (when loaded) is the total -c pool.
+                            # Per-request usable context, which llama.cpp does not report.
                             row["context_length"] = ctx
                         data.append(row)
                     return {"object": "list", "data": data}
@@ -1289,15 +1255,11 @@ class LLMRouter:
                     self._has_requests.clear()
                     continue
 
-                # Clear the wake flag BEFORE reading GPU busy-state, so a port
-                # release (or swap completion) that races in after our read still
-                # re-sets it and re-wakes us — no lost wakeup when we defer below.
+                # Clear the wake flag before reading GPU state, so a racing release still re-wakes us.
                 self._has_requests.clear()
                 self._reap_dead()
                 loaded = self._loaded_models()
-                # Starvation guard: if the oldest queued request's model is not
-                # loaded and it has waited past QUEUE_FORCE_LOAD_TIMEOUT, force
-                # its load instead of serving newer cache-hit requests forever.
+                # Force the head model's load once it has waited past QUEUE_FORCE_LOAD_TIMEOUT.
                 chosen_idx = None
                 head = self.requests[0]
                 head_model = head["request"].get("model")
@@ -1313,14 +1275,10 @@ class LLMRouter:
                         if req_model is None or req_model in loaded:
                             chosen_idx = i
                             break
-                # there's a servable (cache-hit) request: serve it as a concurrent
-                # reader on its GPUs, no loading required
+                # Serve a cache hit as a concurrent reader on its GPUs.
                 if chosen_idx is not None:
                     entry = self.requests.pop(chosen_idx)
-                # otherwise the head model must be loaded. Unless it's starved,
-                # defer while its GPUs are busy serving or mid-swap: we don't want
-                # to evict/compete with in-flight work there. A port release or
-                # swap completion re-wakes the scheduler to retry the load.
+                # Otherwise defer the head model's load while its GPUs are busy serving or swapping.
                 else:
                     head_gpus = self._request_gpus(head_model)
                     if not starved and self._gpus_busy(head_gpus):
@@ -1339,15 +1297,13 @@ class LLMRouter:
                             entry["future"].set_exception(exc)
                         self._has_requests.set()  # re-check the remaining queue
                         continue
-                # More requests may remain: re-arm so the next iteration runs
-                # immediately (pipelining) instead of blocking on the wake flag.
+                # Re-arm so the next iteration pipelines instead of blocking on the wake flag.
                 if self.requests:
                     self._has_requests.set()
                 served_model = entry["request"].get("model")
                 if served_model:
                     self.model_last_used[served_model] = time.time()
-                # pick the least-busy replica of the served model
-                # (model-less requests go to any live instance)
+                # Pick the least-busy replica; model-less requests go to any live instance.
                 if served_model is not None:
                     ports = self.model_ports(served_model)
                 else:
@@ -1363,9 +1319,7 @@ class LLMRouter:
                     continue
                 port = min(ports, key=lambda p: (self.inflight.get(p, 0), p))
                 entry["port"] = port
-                # The GPUs this forward holds as a shared reader = the hosting
-                # replica's model pins (tighter than the request's declared model
-                # for model-less requests).
+                # Hold the hosting replica's own GPU pins as a shared reader.
                 entry["gpus"] = self.model_gpus.get(self.port_model.get(port, ""), list(range(self.num_gpus)))
                 self.inflight[port] = self.inflight.get(port, 0) + 1
 

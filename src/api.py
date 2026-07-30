@@ -14,8 +14,7 @@ from translate.translate import TranslationService
 
 app = FastAPI()
 
-# Shared web UI assets (fonts + design-language CSS/JS) for /dash and /translate.
-# Mounted before the catch-all proxy so /webui/* is served locally, not forwarded.
+# Shared web UI assets, mounted before the catch-all so /webui/* is served locally.
 app.mount("/webui", StaticFiles(directory=Path(__file__).parent / "webui"), name="webui")
 # Dashboard page assets (its own CSS/JS), same reason.
 app.mount("/dash/assets", StaticFiles(directory=Path(__file__).parent / "dash" / "assets"), name="dash-assets")
@@ -215,7 +214,7 @@ async def chat_page():
     Serves the chat single-page app
 
     The shell (navbar + Aa popover + one tab per instance) is ours; each tab
-    embeds a live llama-server replica's own web UI via /instance/{port}/ — a
+    embeds a live llama-server replica's own web UI via /instance/{port}/, a
     same-origin pass-through proxy that forwards straight to that replica and
     bypasses the scheduler/RWLock. Same-origin (not the raw instance port) is
     what makes it work over Tailscale and behind a reverse proxy; bypassing the
@@ -230,12 +229,8 @@ async def chat_page():
         raise HTTPException(status_code=404, detail="Chat app not found")
     return HTMLResponse(html_path.read_text())
 
-# Injected into the proxied llama.cpp index so its ABSOLUTE API paths (/v1/*,
-# /props, ...) get rewritten to /instance/{port}/* and stay pinned to this
-# replica (its relative ./_app/* assets already resolve under the prefix). The
-# __PORT__ token is substituted per request. Without this the UI's API calls
-# would escape the prefix back to the router root — re-entering the scheduler
-# and the very RWLock starvation this design avoids.
+# Rewrites the proxied llama.cpp UI's absolute API paths to /instance/{port}/* so they
+# stay pinned to this replica. __PORT__ is substituted per request.
 _INSTANCE_SHIM = """<script>
 (function () {
   var P = '/instance/__PORT__';
@@ -243,7 +238,7 @@ _INSTANCE_SHIM = """<script>
     if (typeof u !== 'string') return u;
     var s = u;
     if (s.indexOf(location.origin) === 0) s = s.slice(location.origin.length);
-    if (s.charAt(0) !== '/') return u;              // relative or cross-origin — leave
+    if (s.charAt(0) !== '/') return u;              // relative or cross-origin, leave
     if (s === P || s.indexOf(P + '/') === 0) return u;  // already prefixed
     return P + s;
   }
