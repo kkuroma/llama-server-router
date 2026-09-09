@@ -65,9 +65,9 @@ function smoothWithGaps(points, sigma = 2) {
   return out;
 }
 
-// All GPUs on four grids — utilization, VRAM, temperature, power — one line
-// per GPU in its fixed color, sharing a single zoom slider (default window:
-// last 30 min). temp/power histories may be absent from an older backend;
+// All GPUs on four grids (utilization, VRAM, temperature, power), one line per
+// GPU in its fixed color, sharing one zoom slider. temp/power histories may be
+// absent from an older backend;
 // those grids just render empty.
 export function renderGpu(chart, gpus) {
   const p = pal();

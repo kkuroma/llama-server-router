@@ -25,6 +25,7 @@ LOAD_TIMEOUT = 900
 BENCH_TIMEOUT = 900
 HERE = os.path.dirname(os.path.abspath(__file__))
 PROMPT_PATH = os.path.join(HERE, "prompt.txt")
+OUTPUT_DIR = os.path.join(os.path.dirname(HERE), "outputs")
 
 
 def now() -> str:
@@ -354,7 +355,7 @@ def writeReport(data: dict, path: str) -> None:
     ]
     for model, row in data["results"].items():
         if "error" in row:
-            lines.append(f"| {model} | — | — | error: {row['error'][:60]} |")
+            lines.append(f"| {model} | - | - | error: {row['error'][:60]} |")
             continue
         for level in sorted(row["concurrency"], key=int):
             cur = row["concurrency"][level]
@@ -383,8 +384,8 @@ def runAll(instance_url: str, n_runs: int, output_dir: str) -> None:
         None
     """
     os.makedirs(output_dir, exist_ok=True)
-    json_path = os.path.join(output_dir, "benchmark.json")
-    md_path = os.path.join(output_dir, "benchmark.md")
+    json_path = os.path.join(output_dir, "benchmark-throughput.json")
+    md_path = os.path.join(output_dir, "benchmark-throughput.md")
     prompt = readPrompt()
     data = loadJson(json_path)
     data["meta"] = {
@@ -427,7 +428,7 @@ def parseArgs() -> argparse.Namespace:
     """
     parser = argparse.ArgumentParser(description="Benchmark PP/TG speed of llama.cpp models")
     parser.add_argument("--instance-url", required=True, help="Instance base URL, e.g. http://10.10.30.29:11434")
-    parser.add_argument("--output-dir", default="./", help="Directory for benchmark.json/.md (default ./)")
+    parser.add_argument("--output-dir", default=OUTPUT_DIR, help="Directory for benchmark-throughput.json/.md (default ../outputs)")
     parser.add_argument("--n-runs", type=int, default=10, help="Experiments per concurrency level (default 10)")
     return parser.parse_args()
 

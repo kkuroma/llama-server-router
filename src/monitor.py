@@ -30,7 +30,7 @@ class GPUMonitor:
     Detects all devices via NVML at startup and, for each, buffers per-second
     samples and flushes their maxima every FLUSH_INTERVAL to keep history compact.
     All GPUs flush on one shared cadence so their timestamps stay aligned.
-    Temp/power reads are optional per device — an unsupported sensor just leaves
+    Temp/power reads are optional per device, so an unsupported sensor leaves
     that history empty.
     """
 
@@ -41,13 +41,11 @@ class GPUMonitor:
         count = pynvml.nvmlDeviceGetCount()
         if count == 0:
             raise RuntimeError("no NVIDIA GPUs detected")
-        # One state dict per GPU. The *_history lists are the flushed rolling
-        # windows; the _samples lists buffer the current interval's per-second reads.
+        # One state dict per GPU. The _samples lists buffer the current interval.
         self.gpus: list[dict[str, Any]] = []
         for i in range(count):
             handle = pynvml.nvmlDeviceGetHandleByIndex(i)
-            # Name is cosmetic — never let a driver/pynvml quirk here abort the
-            # whole monitor (that would drop GPU detection entirely).
+            # Name is cosmetic, so never let a pynvml quirk abort the whole monitor.
             try:
                 name = pynvml.nvmlDeviceGetName(handle)
                 if isinstance(name, bytes):  # older pynvml returns bytes

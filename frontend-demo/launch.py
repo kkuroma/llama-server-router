@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Frontend demo harness — feeds fake data to the real router SPAs.
+Frontend demo harness that feeds fake data to the real router SPAs.
 
 Serves the actual `/dash`, `/chat`, `/translate` pages and their shared
 `/webui` assets straight from `../src`, then answers every API endpoint those
-pages poll with a live, evolving *simulation* — no llama-server, no GPUs, no
+pages poll with a live, evolving *simulation*: no llama-server, no GPUs, no
 router. A background thread advances a fake fleet (GPU util/VRAM, per-GPU status,
 request history, model load/unload with eviction) so the dashboard is busy the
 moment it opens and stays lively while you poke at it.
@@ -624,7 +624,7 @@ class Handler(BaseHTTPRequestHandler):
             port = parts[2] if len(parts) > 2 else "?"
             if p.rstrip("/").endswith("/props"):
                 return self._json({"default_generation_settings": {"n_ctx": 262144}})
-            model = next((m for m, pt in SIM.port_of.items() if str(pt) == port), "—")
+            model = next((m for m, pt in SIM.port_of.items() if str(pt) == port), "-")
             return self._html(INSTANCE_PAGE.replace("{port}", str(port)).replace("{model}", model))
 
         return self._json({"error": "not found", "path": p}, 404)

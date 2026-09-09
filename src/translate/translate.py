@@ -37,7 +37,7 @@ class TranslationService:
                 self.lang_map[lang_id] = lang_name
         self.prompt_template = PROMPT_TEMPLATE.read_text()
 
-    def getLanguages(self, lang: str | None = None) -> list[dict[str, str]]:
+    def get_languages(self, lang: str | None = None) -> list[dict[str, str]]:
         """
         Returns the language table, optionally filtered by display name
 
@@ -51,7 +51,7 @@ class TranslationService:
             return [l for l in self.languages if l["lang_name"] == lang]
         return self.languages
 
-    def buildMessages(
+    def build_messages(
         self,
         source_id: str,
         target_id: str,

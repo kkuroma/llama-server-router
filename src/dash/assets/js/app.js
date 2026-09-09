@@ -74,14 +74,21 @@ createApp({
     // idle/empty rows don't skew it.
     const historyStats = computed(() => {
       const h = history.value;
-      let prompt = 0, predicted = 0, speedSum = 0, speedN = 0;
+      let prompt = 0, predicted = 0, cached = 0, speedSum = 0, speedN = 0;
       for (const x of h) {
         prompt += x.prompt_n;
         predicted += x.predicted_n;
+        cached += x.cache_n || 0;
         const dur = x.response_time - x.request_time;
         if (dur > 0 && x.predicted_n > 0) { speedSum += x.predicted_n / dur; speedN++; }
       }
-      return { reqs: h.length, prompt, predicted, tokPerSec: speedN ? speedSum / speedN : 0 };
+      // Prompt tokens counts what the clients sent, so the reused prefix belongs in it
+      const sent = prompt + cached;
+      return {
+        reqs: h.length, prompt: sent, predicted, cached,
+        cacheRate: sent ? (100 * cached / sent) : 0,
+        tokPerSec: speedN ? speedSum / speedN : 0,
+      };
     });
 
     function gpuName(idx) {

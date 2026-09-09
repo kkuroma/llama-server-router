@@ -14,6 +14,9 @@
         default = llama-router;
       });
 
+      # `nix develop` / direnv shell: the runtime python deps plus the lint and
+      # type tools, so `python src/main.py`, ruff, black and pyright all resolve
+      # on PATH the moment you cd in. Deps mirror package.nix's pythonEnv.
       devShells = forAllSystems (pkgs:
         let
           pythonEnv = pkgs.python3.withPackages (ps: with ps; [
@@ -22,22 +25,20 @@
             httpx
             aiosqlite
             pynvml
-            # uvicorn[standard] extras — the app runs uvicorn with defaults.
-            uvloop
-            httptools
-            websockets
-            watchfiles
-            python-dotenv
-            pyyaml
           ]);
         in
         {
           default = pkgs.mkShell {
-            packages = [ pythonEnv ];
+            DEV_SHELL = "llama-router";
+            packages = [
+              pythonEnv
+              pkgs.ruff
+              pkgs.black
+              pkgs.pyright
+            ];
             shellHook = ''
-              echo "llama-router dev shell — python $(${pythonEnv}/bin/python3 --version | cut -d' ' -f2)"
-              echo "  app:  python src/main.py"
-              echo "  demo: python frontend-demo/launch.py   # -> http://127.0.0.1:11500/dash"
+              export PYTHONPATH="$PWD/src''${PYTHONPATH:+:$PYTHONPATH}"
+              [[ $- == *i* ]] && exec zsh
             '';
           };
         });
