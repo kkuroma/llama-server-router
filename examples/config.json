@@ -8,8 +8,10 @@
             "num_instance": 1,
             "gpus": [2]
         },
-        "Qwen3-4B-Instruct": {
-            "num_instance": 2
+        "Qwen3.8-27B": {
+            "num_instance": 2,
+            "reasoning_effort": ["low", "medium", "xhigh"],
+            "reasoning_effort_default": "xhigh"
         },
         "Big-Model": {
             "num_instance": 1,

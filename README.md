@@ -106,12 +106,14 @@ Import `llama-router.nixosModules.default` into your host and configure:
       ngl = 99;
     };
 
-    # each model becomes a presets.ini section; num_instance and gpus are
-    # router-only (gpus masks the process via CUDA_VISIBLE_DEVICES; no device key)
+    # each model becomes a presets.ini section; num_instance, gpus, and
+    # reasoning_effort are router-only (gpus masks the process via
+    # CUDA_VISIBLE_DEVICES; no device key)
     models = {
       "Qwen3-4B" = {
         num_instance = 1;
         gpus = [ 0 1 ];  # omit = GPU 0; "all" or -1 = every GPU
+        reasoning_effort = [ "low" "medium" "xhigh" ];  # supported effort levels
         model = "/data/llm-models/Qwen3-4B-Q8_0.gguf";
         c = 65536;
         b = 4096;

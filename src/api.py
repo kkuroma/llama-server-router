@@ -378,22 +378,28 @@ async def v1Models():
     Works even when no llama-server replica is running
 
     Returns:
-        An OpenAI-style list of the configured model ids
+        An OpenAI-style list of the configured model ids with capabilities
     """
     r = getRouter()
     created = int(time.time())
-    return {
-        "object": "list",
-        "data": [
-            {
-                "id": mid,
-                "object": "model",
-                "created": created,
-                "owned_by": "llama-router",
+    models = []
+    for mid, cfg in r.router_config["LLM"].items():
+        entry = {
+            "id": mid,
+            "object": "model",
+            "created": created,
+            "owned_by": "llama-router",
+        }
+        levels = cfg.get("reasoning_effort")
+        if levels:
+            entry["capabilities"] = {
+                "reasoning_effort": {
+                    "levels": levels,
+                    "default": cfg.get("reasoning_effort_default", levels[0]),
+                }
             }
-            for mid in r.router_config["LLM"]
-        ],
-    }
+        models.append(entry)
+    return {"object": "list", "data": models}
 
 @app.get("/router/gpu")
 async def routerGpu():

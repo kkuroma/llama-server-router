@@ -5,11 +5,13 @@ let
 
   iniAtom = with lib.types; oneOf [ bool int float str ];
 
-  # Router JSON: pick num_instance + gpus per model out of the shared `models` attrset.
+  # Router JSON: pick num_instance + gpus + reasoning_effort per model out of the shared `models` attrset.
   routerConfig = pkgs.writeText "llama-router-config.json" (builtins.toJSON {
     LLM = lib.mapAttrs (_: m:
       { num_instance = m.num_instance or 1; }
       // lib.optionalAttrs (m ? gpus) { inherit (m) gpus; }
+      // lib.optionalAttrs (m ? reasoning_effort) { inherit (m) reasoning_effort; }
+      // lib.optionalAttrs (m ? reasoning_effort_default) { inherit (m) reasoning_effort_default; }
     ) cfg.models;
     ROUTER = {
       MAX_MODELS_PER_GPU = cfg.maxModelsPerGpu;
@@ -22,12 +24,13 @@ let
     "llama-server-executable" = "${cfg.llamaCpp}/bin/llama-server";
   });
 
-  # Preset INI: drop num_instance + gpus (router-only) from each model, prepend
-  # the "[*]" globals. Physical placement is NOT emitted as a `device` key:
-  # the router masks each llama-server to its `gpus` via CUDA_VISIBLE_DEVICES,
-  # which both pins compute and keeps ggml's per-device context/buffers off
-  # other GPUs. `gpus` is therefore the single source of truth for placement.
-  mkPreset = m: removeAttrs m [ "num_instance" "gpus" ];
+  # Preset INI: drop num_instance + gpus + reasoning_effort + reasoning_effort_default
+  # (router-only) from each model, prepend the "[*]" globals. Physical placement is NOT
+  # emitted as a `device` key: the router masks each llama-server to its `gpus` via
+  # CUDA_VISIBLE_DEVICES, which both pins compute and keeps ggml's per-device
+  # context/buffers off other GPUs. `gpus` is therefore the single source of truth
+  # for placement.
+  mkPreset = m: removeAttrs m [ "num_instance" "gpus" "reasoning_effort" "reasoning_effort_default" ];
   presetsFormat = pkgs.formats.ini {
     mkKeyValue = lib.generators.mkKeyValueDefault {} " = ";
   };
@@ -105,13 +108,14 @@ in
     };
 
     models = lib.mkOption {
-      type = lib.types.attrsOf (lib.types.attrsOf (lib.types.either iniAtom (lib.types.listOf lib.types.int)));
+      type = lib.types.attrsOf (lib.types.attrsOf (lib.types.either iniAtom (lib.types.listOf (lib.types.either lib.types.int lib.types.str))));
       default = {};
       example = lib.literalExpression ''
         {
           "Qwen3-4B" = {
             num_instance = 1;
             gpus = [ 0 1 ];
+            reasoning_effort = [ "low" "medium" "xhigh" ];
             model = "/data/llm-models/Qwen3-4B-Q8_0.gguf";
             c = 65536;
             parallel = 4;
@@ -120,11 +124,16 @@ in
       '';
       description = ''
         Model presets. Each attribute becomes a llama.cpp presets.ini section;
-        `num_instance` and `gpus` are consumed by the router and stripped from
-        the INI. `gpus` pins the model to GPU ids (omitted = GPU 0 only;
-        "all" or -1 = every GPU) and is the single source of truth for physical
-        placement: the router masks each llama-server to those GPUs via
-        CUDA_VISIBLE_DEVICES, so no `device` key is emitted or needed.
+        `num_instance`, `gpus`, `reasoning_effort`, and `reasoning_effort_default`
+        are consumed by the router and stripped from the INI. `gpus` pins the model
+        to GPU ids (omitted = GPU 0 only; "all" or -1 = every GPU) and is the single
+        source of truth for physical placement: the router masks each llama-server
+        to those GPUs via CUDA_VISIBLE_DEVICES, so no `device` key is emitted or
+        needed. Set `reasoning_effort` to a list of supported effort levels (e.g.
+        [ "low" "medium" "xhigh" ] for Qwen 3.8) to advertise the model's reasoning
+        capabilities via the /v1/models endpoint. Optionally set
+        `reasoning_effort_default` to override which level is advertised as the
+        default (defaults to the first level in the list).
       '';
     };
 

@@ -32,6 +32,8 @@ class ModelCfg(TypedDict):
     """One model's entry in the router config's LLM section."""
     num_instance: int
     gpus: NotRequired[list[int] | int | str]
+    reasoning_effort: NotRequired[list[str]]
+    reasoning_effort_default: NotRequired[str]
 
 
 class RouterSettings(TypedDict, total=False):
