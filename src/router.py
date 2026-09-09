@@ -65,6 +65,7 @@ class HistoryRow(TypedDict):
     response_time: float
     prompt_n: int
     predicted_n: int
+    cache_n: int
 
 
 class Envelope(TypedDict):
@@ -159,6 +160,29 @@ async def _fetch_model_reports(port: int) -> dict[str, dict[str, Any]]:
         }
 
 
+def _token_counts(data: dict[str, Any]) -> tuple[int, int, int]:
+    """
+    Reads the processed, generated and reused token counts out of one reply
+
+    llama.cpp reports timings.prompt_n net of the prefix it reused from the prompt
+    cache, so the usage fallback subtracts the cached tokens to keep one meaning
+    for the stored column
+
+    Args:
+        data (dict): A parsed chat completion reply, or the final SSE chunk of one
+
+    Returns:
+        The (prompt_n, predicted_n, cache_n) triple, all zero when neither block is present
+    """
+    timings = data.get("timings") or {}
+    usage = data.get("usage") or {}
+    cached = (usage.get("prompt_tokens_details") or {}).get("cached_tokens", 0)
+    cache_n = int(timings.get("cache_n", cached) or 0)
+    prompt_n = int(timings.get("prompt_n", max(int(usage.get("prompt_tokens", 0)) - cache_n, 0)) or 0)
+    predicted_n = int(timings.get("predicted_n", usage.get("completion_tokens", 0)) or 0)
+    return prompt_n, predicted_n, cache_n
+
+
 class LLMRouter:
     """
     One llama-server process per loaded model replica
@@ -238,6 +262,7 @@ class LLMRouter:
         Creates the history table and indexes, enabling WAL journaling
 
         Ensures the DB directory exists and marks the history store as ready
+        A database written before cache_n existed is migrated in place
         """
         os.makedirs(os.path.dirname(self._history_db_path), exist_ok=True)
         async with aiosqlite.connect(self._history_db_path) as db:
@@ -249,9 +274,14 @@ class LLMRouter:
                     request_time REAL NOT NULL,
                     response_time REAL NOT NULL,
                     prompt_n INTEGER NOT NULL,
-                    predicted_n INTEGER NOT NULL
+                    predicted_n INTEGER NOT NULL,
+                    cache_n INTEGER NOT NULL DEFAULT 0
                 )
             """)
+            cursor = await db.execute("PRAGMA table_info(history)")
+            columns = {row[1] for row in await cursor.fetchall()}
+            if "cache_n" not in columns:
+                await db.execute("ALTER TABLE history ADD COLUMN cache_n INTEGER NOT NULL DEFAULT 0")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_history_model ON history(model)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_history_time ON history(request_time)")
             await db.commit()
@@ -269,6 +299,7 @@ class LLMRouter:
         response_time: float,
         prompt_n: int,
         predicted_n: int,
+        cache_n: int = 0,
     ):
         """
         Inserts one request-history row, swallowing any storage error
@@ -279,13 +310,15 @@ class LLMRouter:
             response_time (float)   : Unix timestamp the response completed
             prompt_n (int)          : Number of prompt tokens processed
             predicted_n (int)       : Number of generated tokens
+            cache_n (int)           : Number of prompt tokens reused from the cache
         """
         try:
             await self._ensure_history_db()
             async with aiosqlite.connect(self._history_db_path) as db:
                 await db.execute(
-                    "INSERT INTO history (model, request_time, response_time, prompt_n, predicted_n) VALUES (?, ?, ?, ?, ?)",
-                    (model, request_time, response_time, prompt_n, predicted_n),
+                    "INSERT INTO history (model, request_time, response_time, prompt_n, predicted_n, cache_n) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (model, request_time, response_time, prompt_n, predicted_n, cache_n),
                 )
                 await db.commit()
         except Exception as e:
@@ -1372,14 +1405,12 @@ class LLMRouter:
             entry["future"].set_result(resp)
             # Record history from usage/timings
             try:
-                data = resp.json()
-                timings = data.get("timings", {})
-                usage = data.get("usage", {})
-                prompt_n = timings.get("prompt_n", usage.get("prompt_tokens", 0))
-                predicted_n = timings.get("predicted_n", usage.get("completion_tokens", 0))
+                prompt_n, predicted_n, cache_n = _token_counts(resp.json())
                 model = entry["request"].get("model", "unknown")
-                if prompt_n or predicted_n:
-                    await self.record_history(model, entry["request_time"], time.time(), int(prompt_n), int(predicted_n))
+                if prompt_n or predicted_n or cache_n:
+                    await self.record_history(
+                        model, entry["request_time"], time.time(), prompt_n, predicted_n, cache_n
+                    )
             except Exception:
                 pass
         except Exception as e:
@@ -1436,12 +1467,11 @@ class LLMRouter:
             # Record history from the last SSE chunk that contained timings
             if last_data:
                 try:
-                    timings = last_data.get("timings", {})
-                    usage = last_data.get("usage", {})
-                    prompt_n = timings.get("prompt_n", usage.get("prompt_tokens", 0))
-                    predicted_n = timings.get("predicted_n", usage.get("completion_tokens", 0))
+                    prompt_n, predicted_n, cache_n = _token_counts(last_data)
                     model = entry["request"].get("model", "unknown")
-                    if prompt_n or predicted_n:
-                        await self.record_history(model, entry["request_time"], time.time(), int(prompt_n), int(predicted_n))
+                    if prompt_n or predicted_n or cache_n:
+                        await self.record_history(
+                            model, entry["request_time"], time.time(), prompt_n, predicted_n, cache_n
+                        )
                 except Exception:
                     pass

@@ -27,13 +27,29 @@ let
   # the router masks each llama-server to its `gpus` via CUDA_VISIBLE_DEVICES,
   # which both pins compute and keeps ggml's per-device context/buffers off
   # other GPUs. `gpus` is therefore the single source of truth for placement.
-  mkPreset = m: removeAttrs m [ "num_instance" "gpus" ];
+  #
+  # A per-model cache cap lands here rather than in "[*]", and an explicit `cram`
+  # on the model still wins because it merges last.
+  mkPreset = name: m:
+    lib.optionalAttrs (cfg.promptCache.ramMiBPerModel ? ${name})
+      { cram = cfg.promptCache.ramMiBPerModel.${name}; }
+    // removeAttrs m [ "num_instance" "gpus" ];
   presetsFormat = pkgs.formats.ini {
     mkKeyValue = lib.generators.mkKeyValueDefault {} " = ";
   };
+
+  # Prompt cache keys, written into "[*]" so presetGlobals and per-model keys still win.
+  pc = cfg.promptCache;
+  cacheGlobals =
+    { cache-prompt = pc.enable; cram = pc.ramMiB; }
+    // lib.optionalAttrs (pc.reuseChunk != 0) { cache-reuse = pc.reuseChunk; }
+    // lib.optionalAttrs (pc.checkpoints != null) { ctx-checkpoints = pc.checkpoints; }
+    // lib.optionalAttrs (pc.checkpointMinStep != null) { checkpoint-min-step = pc.checkpointMinStep; };
+
+  globals = cacheGlobals // cfg.presetGlobals;
   presetsIni = presetsFormat.generate "llama-presets.ini" (
-    lib.optionalAttrs (cfg.presetGlobals != {}) { "*" = cfg.presetGlobals; }
-    // lib.mapAttrs (_: mkPreset) cfg.models
+    lib.optionalAttrs (globals != {}) { "*" = globals; }
+    // lib.mapAttrs mkPreset cfg.models
   );
 in
 {
@@ -101,7 +117,85 @@ in
       type = lib.types.attrsOf iniAtom;
       default = {};
       example = { jinja = true; fa = true; ngl = 99; };
-      description = "llama.cpp settings applied to every preset (the \"[*]\" wildcard section).";
+      description = ''
+        llama.cpp settings applied to every preset (the "[*]" wildcard section).
+        Keys here override the ones `promptCache` generates, and a key on a model
+        overrides both.
+      '';
+    };
+
+    promptCache = {
+      enable = lib.mkOption {
+        type = lib.types.bool;
+        default = true;
+        description = ''
+          Whether llama.cpp reuses an already-processed prompt prefix instead of
+          reprocessing it (`--cache-prompt`). Off means every request pays full
+          prompt processing, so leave it on unless you are measuring against it.
+        '';
+      };
+
+      ramMiB = lib.mkOption {
+        type = lib.types.ints.unsigned;
+        default = 8192;
+        example = 16384;
+        description = ''
+          Host memory cap for conversations that are not in the slot right now
+          (`--cache-ram`), per llama-server process. 0 disables the host cache, so
+          only the conversation currently in a slot stays warm.
+
+          Size it as (concurrent conversations) x (cost of one conversation at the
+          prompt length you actually run). That cost is a fixed part plus a part that
+          grows with the prompt, so a bytes-per-token figure taken from a short prompt
+          understates a long one. Measured on a 3090 at `q4_0`: Gemma-4-26B-A4B is
+          176 MiB plus 5.7 KiB/token, reaching 909 MiB at its full 131k window, and
+          Wordslop-Qwen3.6-27B is 766 MiB plus 30.2 KiB/token, reaching 8500 MiB at
+          its full 262k window. Over the cap, llama.cpp evicts the least recently
+          used conversation, and returning to it costs a full reprocess. The cap is
+          not an allocation: memory is used only as conversations arrive.
+        '';
+      };
+
+      ramMiBPerModel = lib.mkOption {
+        type = lib.types.attrsOf lib.types.ints.unsigned;
+        default = {};
+        example = { "Wordslop-Qwen3.6-27B" = 32768; };
+        description = ''
+          Per-model override of `ramMiB`, keyed by model name. Use it when one
+          model's cache costs far more per conversation than the rest, either
+          because its context window is longer or because more of its layers hold
+          a KV cache that grows with the prompt. The cap is per llama-server
+          process, so with `maxModelsPerGpu = 1` only the loaded model's cap is
+          ever live and a large value here does not add to the others.
+
+          Written into the model's own preset section, so it beats `ramMiB` and
+          `presetGlobals.cram`; a literal `cram` on the model beats it in turn.
+        '';
+      };
+
+      reuseChunk = lib.mkOption {
+        type = lib.types.ints.unsigned;
+        default = 0;
+        description = ''
+          Smallest chunk llama.cpp will try to salvage by KV shifting when the prompt
+          changed before its tail (`--cache-reuse`). Ignored by models whose context
+          cannot shift, which includes every sliding-window model; those log
+          "cache_reuse is not supported by this context" at load and reprocess from
+          the first changed token.
+        '';
+      };
+
+      checkpoints = lib.mkOption {
+        type = lib.types.nullOr lib.types.ints.unsigned;
+        default = null;
+        description = "Context checkpoints kept per slot (`--ctx-checkpoints`), or null for the llama.cpp default.";
+      };
+
+      checkpointMinStep = lib.mkOption {
+        type = lib.types.nullOr lib.types.ints.unsigned;
+        default = null;
+        description = "Minimum token spacing between context checkpoints (`--checkpoint-min-step`), or null for the llama.cpp default.";
+      };
     };
 
     models = lib.mkOption {
@@ -169,6 +263,15 @@ in
   };
 
   config = lib.mkIf cfg.enable {
+    assertions = [{
+      assertion = lib.all (n: cfg.models ? ${n}) (lib.attrNames cfg.promptCache.ramMiBPerModel);
+      message =
+        "services.llama-router.promptCache.ramMiBPerModel names unknown model(s): "
+        + lib.concatStringsSep ", "
+            (lib.subtractLists (lib.attrNames cfg.models)
+                               (lib.attrNames cfg.promptCache.ramMiBPerModel));
+    }];
+
     users.users.${cfg.user} = {
       isSystemUser = true;
       group = cfg.group;

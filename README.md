@@ -30,6 +30,41 @@ A router that sits in front of your `llama.cpp`'s server that handles seamless m
 
 - **`benchmark-concurrency.py`** hammers a router with N short requests through a bounded worker pool and reports the success rate and latency distribution. It only needs the host and N (`--host localhost:11434 -n 100`). On a 3-GPU box serving three swapping models (gemma-4-26b on `[0,2]`, gemma-4-12b on `[1]`, a qwen-27b on `[0,1,2]`), N=100 concurrent requests completed at a **100% success rate**: the router queued and drained every request across the swaps without dropping one.
 - **`benchmark-throughput.py`** measures prompt-processing and token-generation tok/s per model at concurrency 1 and each model's parallel-slot count.
+- **`benchmark-prompt-cache.py`** measures how much of a prompt llama.cpp reuses instead of reprocessing (`--instance-url` + `--model`): a reuse pass covering repeat, next turn, eviction and `cache_prompt=false`, then a capacity pass that holds N long conversations and revisits each one.
+
+## Prompt caching
+
+Caching belongs to llama.cpp, not the router: request bodies are forwarded verbatim, so a prompt whose prefix a replica already processed is reused whether or not the client sets `cache_prompt`. It is on by default. Two things end a cached conversation: the host cache filling up, and the router evicting the model, which kills the process and everything it held.
+
+Measured on one RTX 3090 with `ctk`/`ctv = q4_0` and `parallel = 1`, at 16k tokens and again at each model's full context window:
+
+| model | prompt | cold | cached | host memory per conversation |
+| --- | --- | --- | --- | --- |
+| Gemma-4-26B-A4B (mxfp4, MTP draft) | 16k | 5.0 s | 0.38 s | 268 MiB |
+| Gemma-4-26B-A4B | 131k, the full window | 65.0 s | 0.16 s | 909 MiB |
+| Wordslop-Qwen3.6-27B (iq2_m) | 16k | 17.4 s | 0.42 s | 1250 MiB |
+| Wordslop-Qwen3.6-27B | 262k, the full window | 574 s | 1.67 s | 8500 MiB |
+
+A cached turn costs about the same whatever the prompt length, so the saving grows with the window: 13x at 16k on Gemma, 344x at 262k on the Qwen hybrid.
+
+Do not size `cram` by extrapolating a bytes-per-token figure from a short prompt. Each held conversation costs a fixed part plus a part that grows with the prompt, and at 16k the fixed part dominates. Across the two lengths above:
+
+| model | growing | fixed per conversation |
+| --- | --- | --- |
+| Gemma-4-26B-A4B | 5.7 KiB/token | 176 MiB |
+| Wordslop-Qwen3.6-27B | 30.2 KiB/token | 766 MiB |
+
+The spread comes from attention geometry, which is readable from the GGUF header. Gemma sets `sliding_window = 1024` and marks 25 of its 30 layers sliding in `sliding_window_pattern`, so only 5 full-attention layers hold a cache that grows with the prompt, and 5.7 KiB/token is what those 5 layers cost at q4_0. The Qwen hybrid sets `full_attention_interval = 4` alongside its SSM parameters, so a quarter of its 65 layers grow and the rest hold a fixed-size recurrent state.
+
+Sizing follows from the table: `cram` (MiB) is the cap on conversations that are not in a slot right now, per llama-server process, so it holds roughly `cram / (cost of one conversation at the length you actually run)`. It is a cap and not an allocation. Past it llama.cpp drops the least recently used conversation, and a round robin over more conversations than fit degrades to no reuse at all rather than to partial reuse. At 16 GiB that is 18 Gemma conversations at 131k, but only 1 Qwen conversation at 262k.
+
+One global `cram` therefore either starves the heavy model or overprovisions the light one. Give the heavy model its own cap with `promptCache.ramMiBPerModel`, which writes `cram` into that model's own preset section. Because the cap is per llama-server process, a large value there costs nothing while another model is loaded: with `maxModelsPerGpu = 1` only one cap is ever live.
+
+There is no time-based expiry anywhere in llama.cpp: size and LRU are the only controls. If you want conversations to stop occupying memory after some idle period, the lever is unloading the model, not the cache.
+
+`cache-reuse` (salvaging a prompt whose middle changed, by KV shifting) is unavailable on sliding-window and hybrid contexts, which is most recent models. They log `cache_reuse is not supported by this context` at load and reprocess from the first changed token, so a client that trims old turns off the front of a conversation pays full price every turn.
+
+Per request, the reuse is visible as `timings.cache_n` in the reply; per process, as `llamacpp:prompt_tokens_cached_total` on the replica's `/metrics`; per model over time, as the Cached column and the cached share of the Prompt tokens tile in `/dash`.
 
 ## Scheduling model
 
@@ -87,11 +122,21 @@ Import `llama-router.nixosModules.default` into your host and configure:
     queueForceLoadTimeout = 300;  # seconds before a starved request forces a load
     # gpuCount = 4;               # optional; autodetected via NVML otherwise
 
+    # prompt cache, written into the "[*]" section (see Prompt caching above)
+    promptCache = {
+      ramMiB = 16384;    # host cap for idle conversations, per llama-server process
+      ramMiBPerModel = { "Wordslop-Qwen3.6-27B" = 32768; };  # heavier model, own cap
+      # reuseChunk = 0;  # KV shifting, ignored by sliding-window models
+    };
+
     # llama.cpp settings applied to every preset (the "[*]" section)
+    # these win over the promptCache keys, and a key on a model wins over everything
     presetGlobals = {
       jinja = true;
       fa = true;
       ngl = 99;
+      ctk = "q4_0";
+      ctv = "q4_0";
     };
 
     # each model becomes a presets.ini section; num_instance and gpus are

@@ -169,7 +169,7 @@
             </div>
             <div class="stat-cell">
               <span class="stat-k">Prompt tokens</span>
-              <span class="stat-v" :style="{ color: pal_blue }">{{ fmtNum(historyStats.prompt) }}</span>
+              <span class="stat-v" :style="{ color: pal_blue }">{{ fmtNum(historyStats.prompt) }}<small>{{ historyStats.cacheRate.toFixed(0) }}% cached</small></span>
             </div>
             <div class="stat-cell">
               <span class="stat-k">Predicted tokens</span>
@@ -200,6 +200,9 @@
                   <th @click="sortHistory('prompt_n')">
                     Prompt <span v-if="historySort.key==='prompt_n'" class="sort-arrow">{{ historySort.asc ? '▲' : '▼' }}</span>
                   </th>
+                  <th @click="sortHistory('cache_n')">
+                    Cached <span v-if="historySort.key==='cache_n'" class="sort-arrow">{{ historySort.asc ? '▲' : '▼' }}</span>
+                  </th>
                   <th @click="sortHistory('predicted_n')">
                     Predicted <span v-if="historySort.key==='predicted_n'" class="sort-arrow">{{ historySort.asc ? '▲' : '▼' }}</span>
                   </th>
@@ -213,10 +216,11 @@
                   <td class="time-cell">{{ formatTime(h.response_time) }}</td>
                   <td class="mono time-cell">{{ (h.response_time - h.request_time).toFixed(1) }}s</td>
                   <td class="mono">{{ h.prompt_n.toLocaleString() }}</td>
+                  <td class="mono">{{ (h.cache_n || 0).toLocaleString() }}</td>
                   <td class="mono">{{ h.predicted_n.toLocaleString() }}</td>
                 </tr>
                 <tr v-if="history.length === 0">
-                  <td colspan="6" class="empty">No requests recorded</td>
+                  <td colspan="7" class="empty">No requests recorded</td>
                 </tr>
               </tbody>
             </table>

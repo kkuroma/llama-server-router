@@ -30,6 +30,8 @@ Config comes entirely from env vars + two config files (no CLI flags):
 
 `examples/config.json` and `examples/presets.ini` are the canonical templates. When developing without GPUs, `pynvml` is optional — GPU monitoring and NVML GPU-count detection degrade gracefully.
 
+`scripts/benchmark-prompt-cache.py --instance-url <url> --model <id>` measures prompt cache reuse against a running router: a reuse pass (repeat, continuation, eviction, `cache_prompt=false`) and a capacity pass that holds N long conversations and revisits each one. A revisit reporting `cache_n` near zero means the state no longer fits llama.cpp's host-side cache and `--cache-ram` (`cram`) is the knob. It reloads the model to start cold, so it takes the GPU for the duration.
+
 ## Architecture
 
 Four modules under `src/`, wired together in `main.py`:
@@ -53,6 +55,8 @@ Four modules under `src/`, wired together in `main.py`:
 3. `_scheduler` picks a request to serve, **preferring one whose model is already resident** (cache-hit maximization). If nothing is servable it loads the head request's model (evicting as needed). It then picks the least-busy replica port (`inflight` count) and dispatches `_do_forward` / `_do_forward_streaming` as a concurrent task.
 4. The forward task resolves the Future with an `httpx.Response` (non-streaming) or an `asyncio.Queue` of chunks terminated by a `None` sentinel (streaming), and records token counts to the SQLite history DB.
 
+Token counts come from `_token_counts()`, which reads llama.cpp's `timings` and falls back to `usage`. History stores three numbers per request: `prompt_n` (tokens the GPU processed), `cache_n` (prompt tokens llama.cpp reused from its cache) and `predicted_n`. `timings.prompt_n` is already net of the reused prefix, so the `usage` fallback subtracts `prompt_tokens_details.cached_tokens` to keep one meaning per column; a DB written before `cache_n` existed is migrated by `init_history_db`. The dashboard's "Prompt tokens" tile shows `prompt_n + cache_n` with the cached share beside it.
+
 ### Scheduling model — read the README before touching this
 
 - **One `llama-server` process per loaded model replica.** Loading a model spawns `num_instance` processes, each pinned to that model's GPUs and hosting only that model. Evicting = `SIGTERM` (then `SIGKILL`) those processes, which frees VRAM unconditionally. The router owns all placement; llama.cpp's own `models-max` is irrelevant here.
@@ -70,6 +74,8 @@ Because `gpus` is duplicated meaning across accounting + masking, changes to res
 ## Nix ↔ config mapping
 
 `module.nix` generates both config files from one `services.llama-router.models` attrset: `num_instance` and `gpus` go into the router JSON (`LLM` section), everything else on a model becomes its `presets.ini` section; `presetGlobals` becomes the `[*]` section. If you add a new router-only per-model field, it must be stripped in `mkPreset` (`removeAttrs`) so it doesn't leak into the INI. Keep `config.json`/`presets.ini` schema, the NixOS module options, and the README table in sync when changing configuration.
+
+`promptCache` is the one typed passthrough: it writes `cache-prompt`/`cram`/`cache-reuse`/`ctx-checkpoints`/`checkpoint-min-step` into `[*]`, and the precedence is model key > `promptCache.ramMiBPerModel` > `presetGlobals` > `promptCache`. `ramMiBPerModel` is the exception that does not write `[*]`: it writes `cram` into the named model's own section, which is why it outranks `presetGlobals`, and an assertion rejects a name that is not in `models`. It exists because `cram` silently decides how many conversations stay warm and its cost per conversation is a per-model number (see the Prompt caching section of the README), so the knob needs a name and a docstring rather than living as one more untyped INI key. Anything else llama.cpp accepts still goes through `presetGlobals` untyped.
 
 ## Conventions
 
