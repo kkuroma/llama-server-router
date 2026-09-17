@@ -1255,6 +1255,8 @@ class LLMRouter:
                         ctx = windows.get(mid)
                         if ctx is not None:
                             row["context_length"] = ctx
+                            if not row.get("meta"):
+                                row["meta"] = {"n_ctx_train": ctx, "n_ctx": ctx}
                         cfg = self.router_config["LLM"][mid]
                         raw_effort = cfg.get("reasoning_effort")
                         levels = _reasoning_effort_levels(raw_effort)
