@@ -265,6 +265,7 @@ class LLMRouter:
         self.model_loaded_at: dict[str, float] = {} # model -> ts of last successful load
         self.model_last_used: dict[str, float] = {} # model -> ts of last dispatched request (or load)
         self._context_windows: dict[str, int] | None = None # cached per-model effective context (see model_context_windows)
+        self._max_output_tokens: dict[str, int] | None = None # cached per-model n-predict (see model_max_output_tokens)
 
         self.status: Status = Status.INACTIVE
         self.processes: dict[int, subprocess.Popen[bytes]] = {} # port -> Popen
@@ -529,6 +530,48 @@ class LLMRouter:
 
         self._context_windows = windows
         return windows
+
+    def model_max_output_tokens(self) -> dict[str, int]:
+        """
+        Returns the n-predict value for each configured model
+
+        Reads n-predict from the presets INI, falling back to the "[*]" global
+        section. Models whose n-predict cannot be resolved are omitted. The
+        presets file is parsed once and the result cached.
+
+        Returns:
+            A dict mapping model id to its max output tokens
+        """
+        if self._max_output_tokens is not None:
+            return self._max_output_tokens
+
+        tokens: dict[str, int] = {}
+        parser = configparser.ConfigParser(inline_comment_prefixes=("#", ";"), strict=False)
+        try:
+            read = parser.read(self.llama_presets_path)
+        except configparser.Error as exc:
+            print(f"[ROUTER] could not parse presets {self.llama_presets_path!r}: {exc}", flush=True)
+            read = []
+
+        if read:
+            def _preset_value(model_id: str, keys: tuple[str, ...]) -> str | None:
+                for section in (model_id, "*"):
+                    for key in keys:
+                        if parser.has_option(section, key):
+                            return parser.get(section, key)
+                return None
+
+            for model_id in self.router_config["LLM"]:
+                raw = _preset_value(model_id, ("n-predict",))
+                if raw is None:
+                    continue
+                try:
+                    tokens[model_id] = int(raw)
+                except ValueError:
+                    continue
+
+        self._max_output_tokens = tokens
+        return tokens
 
     def _plan_evictions(self, model_id: str, loaded: set[str]) -> set[str]:
         """
@@ -1238,6 +1281,7 @@ class LLMRouter:
             An OpenAI-style {"object": "list", "data": [...]} dict
         """
         windows = self.model_context_windows()
+        max_tokens = self.model_max_output_tokens()
         configured = list(self.router_config["LLM"])
         port = self._proxy_port()
         if port is not None:
@@ -1257,6 +1301,9 @@ class LLMRouter:
                             row["context_length"] = ctx
                             if not row.get("meta"):
                                 row["meta"] = {"n_ctx_train": ctx, "n_ctx": ctx}
+                        max_out = max_tokens.get(mid)
+                        if max_out is not None:
+                            row["max_output_tokens"] = max_out
                         cfg = self.router_config["LLM"][mid]
                         raw_effort = cfg.get("reasoning_effort")
                         levels = _reasoning_effort_levels(raw_effort)
@@ -1280,6 +1327,9 @@ class LLMRouter:
             if ctx is not None:
                 entry["context_length"] = ctx
                 entry["meta"] = {"n_ctx_train": ctx, "n_ctx": ctx}
+            max_out = max_tokens.get(mid)
+            if max_out is not None:
+                entry["max_output_tokens"] = max_out
             cfg = self.router_config["LLM"][mid]
             raw_effort = cfg.get("reasoning_effort")
             levels = _reasoning_effort_levels(raw_effort)
