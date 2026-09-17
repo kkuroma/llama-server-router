@@ -10,8 +10,7 @@
         },
         "Qwen3.8-27B": {
             "num_instance": 2,
-            "reasoning_effort": ["low", "medium", "xhigh"],
-            "reasoning_effort_default": "xhigh"
+            "reasoning_effort": { "options": ["low", "medium", "xhigh"], "default": "xhigh" }
         },
         "Big-Model": {
             "num_instance": 1,

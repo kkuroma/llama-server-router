@@ -29,8 +29,7 @@ class ModelCfg(TypedDict):
     """One model's entry in the router config's LLM section."""
     num_instance: int
     gpus: NotRequired[list[int] | int | str]
-    reasoning_effort: NotRequired[list[str]]
-    reasoning_effort_default: NotRequired[str]
+    reasoning_effort: NotRequired[dict[str, Any]]
 
 
 class RouterSettings(TypedDict, total=False):
@@ -160,6 +159,37 @@ async def _fetch_model_reports(port: int) -> dict[str, dict[str, Any]]:
             m.get("id"): (m.get("status") or {})
             for m in data.get("data", [])
         }
+
+
+def _reasoning_effort_levels(cfg: Any) -> list[str] | None:
+    """
+    Extracts the reasoning effort levels from a model config entry
+
+    Args:
+        cfg: The raw reasoning_effort value from the config (dict with "options")
+
+    Returns:
+        The list of levels, or None if not configured
+    """
+    if isinstance(cfg, dict):
+        return cfg.get("options")
+    return None
+
+
+def _reasoning_effort_default(cfg: Any, levels: list[str]) -> str:
+    """
+    Extracts the default reasoning effort level from a model config entry
+
+    Args:
+        cfg: The raw reasoning_effort value from the config
+        levels: The resolved list of levels (used for fallback)
+
+    Returns:
+        The default level
+    """
+    if isinstance(cfg, dict):
+        return cfg.get("default", levels[0] if levels else "")
+    return ""
 
 
 def _token_counts(data: dict[str, Any]) -> tuple[int, int, int]:
@@ -1219,16 +1249,20 @@ class LLMRouter:
                     data = []
                     for mid in configured:
                         row = dict(upstream.get(mid, {"id": mid, "object": "model"}))
+                        row.pop("status", None)
+                        row.pop("source", None)
+                        row.pop("can_remove", None)
                         ctx = windows.get(mid)
                         if ctx is not None:
-                            # Per-request usable context, which llama.cpp does not report.
                             row["context_length"] = ctx
-                        levels = self.router_config["LLM"][mid].get("reasoning_effort")
+                        cfg = self.router_config["LLM"][mid]
+                        raw_effort = cfg.get("reasoning_effort")
+                        levels = _reasoning_effort_levels(raw_effort)
                         if levels:
                             row["capabilities"] = {
                                 "reasoning_effort": {
                                     "levels": levels,
-                                    "default": self.router_config["LLM"][mid].get("reasoning_effort_default", levels[0]),
+                                    "default": _reasoning_effort_default(raw_effort, levels),
                                 }
                             }
                         data.append(row)
@@ -1244,12 +1278,14 @@ class LLMRouter:
             if ctx is not None:
                 entry["context_length"] = ctx
                 entry["meta"] = {"n_ctx_train": ctx, "n_ctx": ctx}
-            levels = self.router_config["LLM"][mid].get("reasoning_effort")
+            cfg = self.router_config["LLM"][mid]
+            raw_effort = cfg.get("reasoning_effort")
+            levels = _reasoning_effort_levels(raw_effort)
             if levels:
                 entry["capabilities"] = {
                     "reasoning_effort": {
                         "levels": levels,
-                        "default": self.router_config["LLM"][mid].get("reasoning_effort_default", levels[0]),
+                        "default": _reasoning_effort_default(raw_effort, levels),
                     }
                 }
             data.append(entry)
