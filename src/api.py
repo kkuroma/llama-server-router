@@ -480,20 +480,72 @@ async def router_translate(request: Request):
     }
 
     future = await r.add_request(envelope)
-    result = await future
 
     if is_streaming:
-        queue = cast("asyncio.Queue[bytes | Exception | None]", result)
+        import time
+        enqueue_time = time.time()
         async def stream_chunks():
+            # Wait for scheduler to pick up the request, checking disconnect while queued
+            result = None
+            while result is None:
+                try:
+                    result = await asyncio.wait_for(future, timeout=0.5)
+                except asyncio.TimeoutError:
+                    if await request.is_disconnected():
+                        wait_time = time.time() - enqueue_time
+                        print(f"[API] client disconnected while queued after {wait_time:.1f}s, cancelling", flush=True)
+                        future.cancel()
+                        return
+                    continue
+                except asyncio.CancelledError:
+                    wait_time = time.time() - enqueue_time
+                    print(f"[API] request cancelled while queued after {wait_time:.1f}s", flush=True)
+                    return
+
+            queue_wait = time.time() - enqueue_time
+            if queue_wait > 1.0:
+                print(f"[API] request dequeued after {queue_wait:.1f}s wait", flush=True)
+
+            if isinstance(result, Exception):
+                raise result
+
+            queue = cast("asyncio.Queue[bytes | Exception | None]", result)
             while True:
-                chunk = await queue.get()
+                try:
+                    chunk = await asyncio.wait_for(queue.get(), timeout=0.5)
+                except asyncio.TimeoutError:
+                    if await request.is_disconnected():
+                        total_time = time.time() - enqueue_time
+                        print(f"[API] client disconnected during streaming after {total_time:.1f}s total, cancelling stream", flush=True)
+                        r.cancel_stream(future)
+                        return
+                    continue
                 if chunk is None:
+                    total_time = time.time() - enqueue_time
+                    print(f"[API] stream completed in {total_time:.1f}s total ({queue_wait:.1f}s queued)", flush=True)
                     break
                 if isinstance(chunk, Exception):
                     raise chunk
                 yield chunk
+                if await request.is_disconnected():
+                    total_time = time.time() - enqueue_time
+                    print(f"[API] client disconnected after chunk at {total_time:.1f}s, cancelling stream", flush=True)
+                    r.cancel_stream(future)
+                    break
         return StreamingResponse(stream_chunks(), media_type="text/event-stream")
     else:
+        try:
+            result = await future
+        except Exception as e:
+            return JSONResponse(
+                status_code=502,
+                content={
+                    "error": {
+                        "message": str(e),
+                        "code": "upstream_error"
+                    }
+                }
+            )
         response = cast(httpx.Response, result)
         return JSONResponse(content=response.json(), status_code=response.status_code)
 
@@ -568,31 +620,77 @@ async def proxy(full_path: str, request: Request):
 
     # enqueue and await result
     future = await r.add_request(envelope)
-    try:
-        result = await future
-    except Exception as e:
-        return JSONResponse(
-            status_code=502,
-            content={
-                "error": {
-                    "message": str(e),
-                    "code": "upstream_error"
-                }
-            }
-        )
 
     if is_streaming:
-        queue = cast("asyncio.Queue[bytes | Exception | None]", result)
+        import time
+        enqueue_time = time.time()
         async def stream_chunks():
+            # Wait for scheduler to pick up the request, checking disconnect while queued
+            result = None
+            while result is None:
+                try:
+                    result = await asyncio.wait_for(future, timeout=0.5)
+                except asyncio.TimeoutError:
+                    if await request.is_disconnected():
+                        wait_time = time.time() - enqueue_time
+                        print(f"[API] client disconnected while queued after {wait_time:.1f}s, cancelling", flush=True)
+                        future.cancel()
+                        return
+                    continue
+                except asyncio.CancelledError:
+                    wait_time = time.time() - enqueue_time
+                    print(f"[API] request cancelled while queued after {wait_time:.1f}s", flush=True)
+                    return
+                except Exception as e:
+                    print(f"[API] error while queued: {e}", flush=True)
+                    yield f"data: {json.dumps({'error': str(e)})}\n\n"
+                    return
+
+            queue_wait = time.time() - enqueue_time
+            if queue_wait > 1.0:
+                print(f"[API] request dequeued after {queue_wait:.1f}s wait", flush=True)
+
+            if isinstance(result, Exception):
+                yield f"data: {json.dumps({'error': str(result)})}\n\n"
+                return
+
+            queue = cast("asyncio.Queue[bytes | Exception | None]", result)
             while True:
-                chunk = await queue.get()
+                try:
+                    chunk = await asyncio.wait_for(queue.get(), timeout=0.5)
+                except asyncio.TimeoutError:
+                    if await request.is_disconnected():
+                        total_time = time.time() - enqueue_time
+                        print(f"[API] client disconnected during streaming after {total_time:.1f}s total, cancelling stream", flush=True)
+                        r.cancel_stream(future)
+                        return
+                    continue
                 if chunk is None:
+                    total_time = time.time() - enqueue_time
+                    print(f"[API] stream completed in {total_time:.1f}s total ({queue_wait:.1f}s queued)", flush=True)
                     break
                 if isinstance(chunk, Exception):
                     raise chunk
                 yield chunk
+                if await request.is_disconnected():
+                    total_time = time.time() - enqueue_time
+                    print(f"[API] client disconnected after chunk at {total_time:.1f}s, cancelling stream", flush=True)
+                    r.cancel_stream(future)
+                    break
         return StreamingResponse(stream_chunks(), media_type="text/event-stream")
     else:
+        try:
+            result = await future
+        except Exception as e:
+            return JSONResponse(
+                status_code=502,
+                content={
+                    "error": {
+                        "message": str(e),
+                        "code": "upstream_error"
+                    }
+                }
+            )
         response = cast(httpx.Response, result)
         content_type = cast(str, response.headers.get("Content-Type", ""))
         safe_headers = {

@@ -285,6 +285,7 @@ class LLMRouter:
         self._has_requests = asyncio.Event()
         self._running = False
         self._scheduler_task: asyncio.Task[None] | None = None
+        self._stream_tasks: dict[asyncio.Future, asyncio.Task] = {} # future -> streaming task (for disconnect cancellation)
         self._history_db_path = HISTORY_DB_PATH
         self._history_db_ready = False
 
@@ -1374,6 +1375,22 @@ class LLMRouter:
             self._has_requests.set()
         return future
 
+    def cancel_stream(self, future: "asyncio.Future") -> None:
+        """
+        Cancels the streaming task associated with a future when the client disconnects
+
+        Releases the port and GPU lock by cancelling the upstream forwarding task
+
+        Args:
+            future (asyncio.Future): The future returned by add_request
+        """
+        task = self._stream_tasks.pop(future, None)
+        if task and not task.done():
+            print(f"[ROUTER] cancelling stream task (client disconnected)", flush=True)
+            task.cancel()
+        else:
+            print(f"[ROUTER] cancel_stream called but no active task found", flush=True)
+
     async def _scheduler(self):
         """
         Continuously picks queued requests and dispatches forwarding tasks
@@ -1398,15 +1415,19 @@ class LLMRouter:
                 self._has_requests.clear()
                 self._reap_dead()
                 loaded = self._loaded_models()
+                queue_depth = len(self.requests)
                 # Force the head model's load once it has waited past QUEUE_FORCE_LOAD_TIMEOUT.
                 chosen_idx = None
                 head = self.requests[0]
                 head_model = head["request"].get("model")
+                head_wait = time.time() - head["request_time"]
                 starved = (
                     head_model is not None
                     and head_model not in loaded
-                    and time.time() - head["request_time"] >= self.QUEUE_FORCE_LOAD_TIMEOUT
+                    and head_wait >= self.QUEUE_FORCE_LOAD_TIMEOUT
                 )
+                if queue_depth > 1 or head_wait > 2.0:
+                    print(f"[ROUTER] queue: {queue_depth} requests, head={head_model!r} waited {head_wait:.1f}s, loaded={loaded or 'none'}", flush=True)
                 if not starved:
                     # pick a request to serve: first request that matches the model or has no model field
                     for i, entry in enumerate(self.requests):
@@ -1417,6 +1438,9 @@ class LLMRouter:
                 # Serve a cache hit as a concurrent reader on its GPUs.
                 if chosen_idx is not None:
                     entry = self.requests.pop(chosen_idx)
+                    served_wait = time.time() - entry["request_time"]
+                    if served_wait > 1.0:
+                        print(f"[ROUTER] serving request for {entry['request'].get('model')!r} after {served_wait:.1f}s in queue", flush=True)
                 # Otherwise defer the head model's load while its GPUs are busy serving or swapping.
                 else:
                     head_gpus = self._request_gpus(head_model)
@@ -1465,8 +1489,12 @@ class LLMRouter:
             # Dispatch forwarding as a concurrent task
             if entry["is_streaming"]:
                 queue = asyncio.Queue()
-                entry["future"].set_result(queue)
-                asyncio.create_task(self._do_forward_streaming(entry, queue))
+                future = entry["future"]
+                future.set_result(queue)
+                task = asyncio.create_task(self._do_forward_streaming(entry, queue))
+                self._stream_tasks[future] = task
+                # Clean up mapping when task finishes
+                task.add_done_callback(lambda t: self._stream_tasks.pop(future, None))
             else:
                 asyncio.create_task(self._do_forward(entry))
 
@@ -1564,12 +1592,17 @@ class LLMRouter:
                                     last_data = json.loads(line[6:])
                                 except (json.JSONDecodeError, ValueError):
                                     pass
+        except asyncio.CancelledError:
+            print(f"[ROUTER] stream task cancelled for port {entry['port']}, releasing resources", flush=True)
+            raise
         except Exception as e:
+            print(f"[ROUTER] stream error on port {entry['port']}: {e}", flush=True)
             await queue.put(e)
         finally:
             queue.put_nowait(None)
             self._release_port(entry["port"])
             await self._release_shared(gpus)
+            print(f"[ROUTER] released port {entry['port']} and gpus {gpus}", flush=True)
             # Record history from the last SSE chunk that contained timings
             if last_data:
                 try:
