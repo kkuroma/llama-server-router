@@ -1451,6 +1451,10 @@ class LLMRouter:
                         print(f"[ROUTER] head-of-queue request for {head_model} waited "
                               f">{self.QUEUE_FORCE_LOAD_TIMEOUT}s, force-loading", flush=True)
                     entry = self.requests.pop(0)
+                    # Skip if client cancelled while we were deciding/loading
+                    if entry["future"].done():
+                        print(f"[ROUTER] skipping cancelled request (waited {time.time() - entry['request_time']:.1f}s)", flush=True)
+                        continue
                     model_to_load = entry["request"].get("model")
                     try:
                         await self.load_model(model_to_load)
@@ -1460,6 +1464,10 @@ class LLMRouter:
                             entry["future"].set_exception(exc)
                         self._has_requests.set()  # re-check the remaining queue
                         continue
+                # Skip if client cancelled while queued (cache-hit path)
+                if entry["future"].done():
+                    print(f"[ROUTER] skipping cancelled request (waited {time.time() - entry['request_time']:.1f}s)", flush=True)
+                    continue
                 # Re-arm so the next iteration pipelines instead of blocking on the wake flag.
                 if self.requests:
                     self._has_requests.set()
