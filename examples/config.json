@@ -21,6 +21,7 @@
         "MAX_MODELS_PER_GPU": 1,
         "EVICTION_POLICY": "lru",
         "QUEUE_FORCE_LOAD_TIMEOUT": 300.0,
+        "QUEUE_HEAD_GRACE": 0.0,
         "HEALTH_CHECK_INTERVAL": 1.0,
         "HEALTH_CHECK_TIMEOUT": 30.0,
         "UNLOAD_POLL_INTERVAL": 0.5,

@@ -32,6 +32,16 @@ A router that sits in front of your `llama.cpp`'s server that handles seamless m
 - **`benchmark-throughput.py`** measures prompt-processing and token-generation tok/s per model at concurrency 1 and each model's parallel-slot count.
 - **`benchmark-prompt-cache.py`** measures how much of a prompt llama.cpp reuses instead of reprocessing (`--instance-url` + `--model`): a reuse pass covering repeat, next turn, eviction and `cache_prompt=false`, then a capacity pass that holds N long conversations and revisits each one.
 
+## Tests
+
+`tests/` runs the scheduler against real weights, since ordering and concurrency do not survive a mock. Each case spawns `src/main.py` on its own port, drives it over HTTP, and reads concurrency off the arrival time of every streamed token.
+
+- **`test_request_order.py`** sends a long request to model 0, a request to model 1 a tenth of a second later, then another to model 0, and requires the replies in that same order. A later request for the resident model may not overtake the queued one that needs a swap. The test config sets `QUEUE_HEAD_GRACE` to 0 and parks `QUEUE_FORCE_LOAD_TIMEOUT` out of reach, so a pass can only come from the ordering and never from a timer firing.
+- **`test_canceled_order.py`** fills both slots with long requests, drops one client mid-stream, then sends two trivial requests behind it and requires them to finish before the survivor. A disconnect ends the request, so the slot has to come back immediately rather than when the abandoned generation would have ended.
+- **`test_concurrent_request.py`** fires N users at one model with `parallel = P` slots and requires `min(N, P)` of them to generate at the same instant, at a combined token rate well above a single stream. It reads the replica's own `/slots` alongside, which tells a stalled router apart from a replica that only came up with one slot.
+
+Every request sends the same ~14k token essay from `tests/prompt.txt` and asks for a 2000 word continuation, differing only in its closing line, so the shared prefix and the long generation both behave the way a fleet of agents does. Ports, the llama-server binary, both model directories and the size of every case live in `tests/configs.toml`. Run them with `./run_tests.sh`, which enters the nix dev shell first. They are marked `gpu`, so a bare `pytest` collects them and filters them out.
+
 ## Prompt caching
 
 Caching belongs to llama.cpp, not the router: request bodies are forwarded verbatim, so a prompt whose prefix a replica already processed is reused whether or not the client sets `cache_prompt`. It is on by default. Two things end a cached conversation: the host cache filling up, and the router evicting the model, which kills the process and everything it held.
@@ -77,7 +87,7 @@ Example with `MAX_MODELS_PER_GPU = 1`: models A and B pinned to GPUs `[0, 1]`, C
 - **No `gpus` field** → the model counts against GPU 0 only. On a single-GPU host this reproduces plain global behavior exactly.
 - **`gpus = "all"` or `-1`** → the model counts against every GPU (it will evict on all of them as needed).
 - **Eviction policy**: `lru` (default, evicts the model whose last request is oldest) or `fifo` (evicts the earliest-loaded model). Either way, residents with requests still waiting in the queue are only evicted when there is no other candidate on that GPU.
-- **Anti-starvation**: if the head-of-queue request needs a model that isn't loaded and has waited longer than `QUEUE_FORCE_LOAD_TIMEOUT` (default 300 s), the router force-loads it instead of serving newer cache-hit requests forever.
+- **Anti-starvation**: a head-of-queue request whose model isn't loaded holds the queue once it has waited `QUEUE_HEAD_GRACE` (default 0 s), so later requests for the resident model stop being served ahead of it and the swap happens as soon as the in-flight work drains. At 0 arrival order is absolute and two models in alternation pay a swap each time; raising it buys cache hits back at the cost of that ordering. `QUEUE_FORCE_LOAD_TIMEOUT` (default 300 s) stays as the last resort behind it.
 - **Crash recovery**: dead replicas are reaped automatically; the model simply reloads on its next request.
 - **`num_instance > 1`** spawns that many replica processes of the model (requests balance across them by in-flight count). Each replica is a full copy of the weights — VRAM scales linearly.
 - GPU count is autodetected via NVML; override with `ROUTER.NUM_GPUS` (falls back to highest pinned id + 1 when NVML is unavailable).
@@ -212,4 +222,4 @@ Configuration is passed via environment variables:
 | `ROUTER_HOST`        | `0.0.0.0`                   | API bind address                                 |
 | `HISTORY_DB_PATH`    | `/webui/monitor/history.db` | SQLite request history                           |
 
-Scheduler settings live in the `ROUTER` section of `config.json`: `MAX_MODELS_PER_GPU` (default 1), `EVICTION_POLICY` (`lru`/`fifo`), `QUEUE_FORCE_LOAD_TIMEOUT` (seconds, default 300), `NUM_GPUS` (optional override), plus the health-check/load/unload timings shown in `examples/config.json`.
+Scheduler settings live in the `ROUTER` section of `config.json`: `MAX_MODELS_PER_GPU` (default 1), `EVICTION_POLICY` (`lru`/`fifo`), `QUEUE_HEAD_GRACE` (seconds, default 0), `QUEUE_FORCE_LOAD_TIMEOUT` (seconds, default 300), `NUM_GPUS` (optional override), plus the health-check/load/unload timings shown in `examples/config.json`.

@@ -45,6 +45,7 @@ class RouterSettings(TypedDict, total=False):
     MAX_MODELS_PER_GPU: int
     EVICTION_POLICY: str
     QUEUE_FORCE_LOAD_TIMEOUT: float
+    QUEUE_HEAD_GRACE: float
     NUM_GPUS: int
 
 
@@ -250,6 +251,7 @@ class LLMRouter:
             self.MAX_MODELS_PER_GPU = int(router_settings.get("MAX_MODELS_PER_GPU", 1)) # resident-model cap PER GPU (not global)
             eviction_policy = str(router_settings.get("EVICTION_POLICY", "lru")).lower() # "lru" (last request) or "fifo" (load time)
             self.QUEUE_FORCE_LOAD_TIMEOUT = float(router_settings.get("QUEUE_FORCE_LOAD_TIMEOUT", 300.0)) # seconds a queued request may starve before its model is force-loaded
+            self.QUEUE_HEAD_GRACE = float(router_settings.get("QUEUE_HEAD_GRACE", 0.0)) # seconds a blocked head tolerates cache hits jumping it (0 = arrival order is absolute)
 
         if eviction_policy not in ("lru", "fifo"):
             print(f"[ROUTER] unknown EVICTION_POLICY {eviction_policy!r}, falling back to 'lru'", flush=True)
@@ -278,6 +280,7 @@ class LLMRouter:
         self._last_load_error: str | None = None # reason the most recent load attempt failed (e.g. worker OOM)
         self._last_load_fatal: bool = False # True if that failure was deterministic (worker exited/failed) -> don't retry
         self.requests:  list[dict[str, Any]] = [] # [{request, future, is_streaming, request_time}, ...]
+        self.request_tasks: dict["asyncio.Future[Any]", "asyncio.Task[None]"] = {} # future -> forwarding task
         self.request_lock = asyncio.Lock()
         # One RWLock per GPU: generation takes the reader, load/unload the writer.
         self._gpu_locks: dict[int, AsyncRWLock] = {g: AsyncRWLock() for g in range(self.num_gpus)}
@@ -1008,6 +1011,10 @@ class LLMRouter:
             except asyncio.CancelledError:
                 pass
         self._scheduler_task = None
+        for task in list(self.request_tasks.values()):
+            if not task.done():
+                task.cancel()
+        self.request_tasks.clear()
         # Reject all pending futures
         for entry in self.requests:
             fut = entry.get("future")
@@ -1374,14 +1381,51 @@ class LLMRouter:
             self._has_requests.set()
         return future
 
+    def cancel_request(self, future: "asyncio.Future[ForwardResult]") -> None:
+        """
+        Drops a request whose client has gone away, queued or in flight
+
+        A closed connection cannot be told apart from an explicit cancel and
+        carries no way to resume, so both end the request. An in-flight forward
+        is cancelled, which closes the upstream socket and frees the replica's
+        slot; a request still waiting in the queue is simply removed.
+
+        Args:
+            future (asyncio.Future): The future add_request handed the caller
+        """
+        task = self.request_tasks.pop(future, None)
+        if task is not None:
+            if not task.done():
+                print("[ROUTER] client gone, cancelling in-flight request", flush=True)
+                task.cancel()
+            return
+        if any(entry["future"] is future for entry in self.requests):
+            asyncio.create_task(self._drop_queued(future))
+
+    async def _drop_queued(self, future: "asyncio.Future[ForwardResult]") -> None:
+        """
+        Removes an abandoned request from the queue under the request lock
+
+        Args:
+            future (asyncio.Future): The future identifying the queued request
+        """
+        async with self.request_lock:
+            for i, entry in enumerate(self.requests):
+                if entry["future"] is future:
+                    self.requests.pop(i)
+                    print(f"[ROUTER] client gone, dropped queued request for "
+                          f"{entry['request'].get('model')}", flush=True)
+                    break
+
     async def _scheduler(self):
         """
         Continuously picks queued requests and dispatches forwarding tasks
 
-        Maximizes cache hits by preferring requests whose model is already
-        loaded. When nothing is servable it loads the head request's model, and
-        a starvation guard force-loads the head model once it waits past
-        QUEUE_FORCE_LOAD_TIMEOUT so cache-hit requests can't starve it forever.
+        Prefers requests whose model is already loaded, which maximizes cache
+        hits, but only until the head of the queue has waited QUEUE_HEAD_GRACE
+        for a model that is not resident. Past that the head holds the queue and
+        the swap happens as soon as the in-flight work drains, with
+        QUEUE_FORCE_LOAD_TIMEOUT as the last resort behind it.
         """
         while self._running:
             await self._has_requests.wait()
@@ -1402,12 +1446,13 @@ class LLMRouter:
                 chosen_idx = None
                 head = self.requests[0]
                 head_model = head["request"].get("model")
-                starved = (
-                    head_model is not None
-                    and head_model not in loaded
-                    and time.time() - head["request_time"] >= self.QUEUE_FORCE_LOAD_TIMEOUT
-                )
-                if not starved:
+                head_wait = time.time() - head["request_time"]
+                blocked = head_model is not None and head_model not in loaded
+                # Once a blocked head has waited its grace it holds the queue, so later requests
+                # for the resident model stop jumping it. At a grace of 0 arrival order is absolute.
+                holding = blocked and head_wait >= self.QUEUE_HEAD_GRACE
+                starved = blocked and head_wait >= self.QUEUE_FORCE_LOAD_TIMEOUT
+                if not holding:
                     # pick a request to serve: first request that matches the model or has no model field
                     for i, entry in enumerate(self.requests):
                         req_model = entry["request"].get("model")
@@ -1462,13 +1507,14 @@ class LLMRouter:
                 entry["gpus"] = self.model_gpus.get(self.port_model.get(port, ""), list(range(self.num_gpus)))
                 self.inflight[port] = self.inflight.get(port, 0) + 1
 
-            # Dispatch forwarding as a concurrent task
+            # Dispatch forwarding as a concurrent task, tracked so a dead client can cancel it
             if entry["is_streaming"]:
-                queue = asyncio.Queue()
+                queue: StreamQueue = asyncio.Queue()
                 entry["future"].set_result(queue)
-                asyncio.create_task(self._do_forward_streaming(entry, queue))
+                task = asyncio.create_task(self._do_forward_streaming(entry, queue))
             else:
-                asyncio.create_task(self._do_forward(entry))
+                task = asyncio.create_task(self._do_forward(entry))
+            self.request_tasks[entry["future"]] = task
 
     def _release_port(self, port: int):
         """
@@ -1523,8 +1569,9 @@ class LLMRouter:
             if not entry["future"].done():
                 entry["future"].set_exception(e)
         finally:
+            self.request_tasks.pop(entry["future"], None)
             self._release_port(entry["port"])
-            await self._release_shared(gpus)
+            await asyncio.shield(self._release_shared(gpus))
 
     async def _do_forward_streaming(self, entry: dict[str, Any], queue: StreamQueue):
         """
@@ -1564,12 +1611,15 @@ class LLMRouter:
                                     last_data = json.loads(line[6:])
                                 except (json.JSONDecodeError, ValueError):
                                     pass
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             await queue.put(e)
         finally:
+            self.request_tasks.pop(entry["future"], None)
             queue.put_nowait(None)
             self._release_port(entry["port"])
-            await self._release_shared(gpus)
+            await asyncio.shield(self._release_shared(gpus))
             # Record history from the last SSE chunk that contained timings
             if last_data:
                 try:

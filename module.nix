@@ -17,6 +17,7 @@ let
       MAX_MODELS_PER_GPU = cfg.maxModelsPerGpu;
       EVICTION_POLICY = cfg.evictionPolicy;
       QUEUE_FORCE_LOAD_TIMEOUT = cfg.queueForceLoadTimeout;
+      QUEUE_HEAD_GRACE = cfg.queueHeadGrace;
     } // lib.optionalAttrs (cfg.gpuCount != null) { NUM_GPUS = cfg.gpuCount; }
       // cfg.routerSettings;
     "API-port" = cfg.port;
@@ -247,6 +248,17 @@ in
       type = lib.types.numbers.positive;
       default = 300;
       description = "Seconds the head-of-queue request may wait for an unloaded model before the router force-loads it past newer cache-hit requests.";
+    };
+
+    queueHeadGrace = lib.mkOption {
+      type = lib.types.numbers.nonnegative;
+      default = 0;
+      description = ''
+        Seconds a head-of-queue request whose model is not loaded tolerates newer requests for
+        a resident model being served ahead of it. At 0 arrival order is absolute and two models
+        in alternation pay a swap each time; raising it trades that ordering for cache hits, and
+        queueForceLoadTimeout remains the last resort behind it.
+      '';
     };
 
     gpuCount = lib.mkOption {

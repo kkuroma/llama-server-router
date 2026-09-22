@@ -14,9 +14,10 @@
         default = llama-router;
       });
 
-      # `nix develop` / direnv shell: the runtime python deps plus the lint and
-      # type tools, so `python src/main.py`, ruff, black and pyright all resolve
-      # on PATH the moment you cd in. Deps mirror package.nix's pythonEnv.
+      # `nix develop` / direnv shell: the runtime python deps plus pytest and the
+      # lint and type tools, so `python src/main.py`, `./run_tests.sh`, ruff, black
+      # and pyright all resolve on PATH the moment you cd in. Deps mirror
+      # package.nix's pythonEnv, which ships without pytest.
       devShells = forAllSystems (pkgs:
         let
           pythonEnv = pkgs.python3.withPackages (ps: with ps; [
@@ -25,6 +26,7 @@
             httpx
             aiosqlite
             pynvml
+            pytest
           ]);
         in
         {

@@ -1,0 +1,103 @@
+# The router under test. Ports sit off the deployed router's 11434/30000 so both can run.
+[Router]
+host = "127.0.0.1"
+api_port = 21434
+llm_base_port = 31000
+llama_server = "/nix/store/ykxfz3fmxfk8sbfpbckyv5djn94zgawy-llama-cpp-0.4.1/bin/llama-server"
+startup_timeout = 60.0
+shutdown_timeout = 30.0
+load_timeout = 300.0
+# A swap needs the whole model to fit alone, so refuse to run on a busy card
+min_free_vram_mib = 20000
+
+# Copied verbatim into the generated config.json as its ROUTER section
+[Router.settings]
+MAX_MODELS_PER_GPU = 1
+EVICTION_POLICY = "lru"
+# Arrival order is absolute and the force-load rescue is parked out of reach, so an
+# ordering pass can only come from the scheduler and never from a timer firing
+QUEUE_HEAD_GRACE = 0.0
+QUEUE_FORCE_LOAD_TIMEOUT = 86400.0
+HEALTH_CHECK_INTERVAL = 0.5
+HEALTH_CHECK_TIMEOUT = 120.0
+UNLOAD_POLL_INTERVAL = 0.5
+UNLOAD_POLL_TIMEOUT = 60.0
+LOAD_POLL_INTERVAL = 0.5
+LOAD_POLL_TIMEOUT = 240.0
+START_RETRIES = 1
+GRACEFUL_KILL_TIMEOUT = 5.0
+NUM_GPUS = 1
+
+# The [*] section of the generated presets.ini
+[Presets]
+jinja = true
+fa = true
+ngl = 99
+ctk = "q4_0"
+ctv = "q4_0"
+cache-prompt = true
+cram = 4096
+
+# The shared prompt every case sends, and the per request tail that keeps them distinct
+[Prompt]
+file = "prompt.txt"
+variant = "[concurrent request {index}]"
+
+[Models]
+# Every model is generated once per slot count, as "<id>-p<n>"
+slot_counts = [2, 4]
+# The prompt is about 14k tokens and the answer about 2.7k, so a slot needs room for both
+per_slot_ctx = 24576
+
+[Models.model_0]
+id = "TestModel0"
+dir = "/Vault/llm-models/models/GPT-OSS-20B"
+weights = "model_f16.gguf"
+gpus = [0]
+b = 4096
+ub = 512
+
+[Models.model_1]
+id = "TestModel1"
+dir = "/Vault/llm-models/models/Gemma-4-12B"
+weights = "model_q8_0.gguf"
+gpus = [0]
+b = 4096
+ub = 512
+
+# test_request_order.py: requests arrive gap seconds apart, indices name the model
+[Order]
+gap = 0.1
+slots = 2
+max_tokens = 2700
+min_tokens = 2000
+poll_interval = 0.25
+sequence = [0, 1, 0]
+expanded_sequence = [0, 1, 0, 1, 0]
+
+# test_concurrent_request.py: users fire at once against a model with slots server slots
+# min_speedup compares the batch's wall clock against running the same users one at a time,
+# so a scheduler that takes turns scores 1.0 no matter how fast the model is. One stream of
+# this model already saturates a 3090's bandwidth, so the measured ceiling is 1.50 at two
+# slots and 1.72 at four, and the bars sit under those.
+[Concurrency]
+max_tokens = 2700
+min_tokens = 2000
+overlap_step = 0.05
+mean_overlap_factor = 0.7
+first_token_spread = 25.0
+stages = [
+    { users = 4, slots = 2, min_speedup = 1.35 },
+    { users = 8, slots = 2, min_speedup = 1.35 },
+    { users = 8, slots = 4, min_speedup = 1.55 },
+]
+
+# test_canceled_order.py: one of two long requests is dropped mid stream, and two short
+# requests sent behind it have to finish before the survivor does
+[Cancel]
+slots = 2
+kill_after = 10.0
+max_tokens = 2700
+min_tokens = 2000
+short_prompt = "hello"
+short_max_tokens = 128

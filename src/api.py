@@ -45,6 +45,55 @@ class ProxyBody(TypedDict, total=False):
     stream: bool
 
 
+# A dead connection is only noticed when something looks, so queued requests get polled
+DISCONNECT_POLL_INTERVAL = 0.5
+
+
+class ClientGone(Exception):
+    """Raised when the requesting client disconnects before its reply is ready."""
+
+
+async def _wait_disconnect(request: Request):
+    """
+    Returns once the client's connection has gone away
+
+    Args:
+        request (Request): The incoming request to watch
+    """
+    while not await request.is_disconnected():
+        await asyncio.sleep(DISCONNECT_POLL_INTERVAL)
+
+
+async def _resolve_or_drop(request: Request, future, r: LLMRouter):
+    """
+    Waits for the router's reply, dropping the request if the client hangs up first
+
+    A closed connection carries no way to resume and cannot be told apart from an
+    explicit cancel, so it ends the request rather than leaving a replica
+    generating for nobody.
+
+    Args:
+        request (Request)       : The incoming request to watch
+        future (asyncio.Future) : The future add_request returned
+        r (LLMRouter)           : The router to cancel through
+
+    Returns:
+        The forwarding result, once the router produces one
+
+    Raises:
+        ClientGone: If the connection closes before the reply is ready
+    """
+    watcher = asyncio.ensure_future(_wait_disconnect(request))
+    try:
+        done, _ = await asyncio.wait({future, watcher}, return_when=asyncio.FIRST_COMPLETED)
+        if future in done:
+            return future.result()
+        r.cancel_request(future)
+        raise ClientGone()
+    finally:
+        watcher.cancel()
+
+
 def get_router() -> LLMRouter:
     """
     Returns the initialized router or raises if it is not ready yet
@@ -480,18 +529,25 @@ async def router_translate(request: Request):
     }
 
     future = await r.add_request(envelope)
-    result = await future
+    try:
+        result = await _resolve_or_drop(request, future, r)
+    except ClientGone:
+        return Response(status_code=499)
 
     if is_streaming:
         queue = cast("asyncio.Queue[bytes | Exception | None]", result)
         async def stream_chunks():
-            while True:
-                chunk = await queue.get()
-                if chunk is None:
-                    break
-                if isinstance(chunk, Exception):
-                    raise chunk
-                yield chunk
+            """Drains the router's queue, cancelling the forward if the client leaves."""
+            try:
+                while True:
+                    chunk = await queue.get()
+                    if chunk is None:
+                        break
+                    if isinstance(chunk, Exception):
+                        raise chunk
+                    yield chunk
+            finally:
+                r.cancel_request(future)
         return StreamingResponse(stream_chunks(), media_type="text/event-stream")
     else:
         response = cast(httpx.Response, result)
@@ -569,7 +625,10 @@ async def proxy(full_path: str, request: Request):
     # enqueue and await result
     future = await r.add_request(envelope)
     try:
-        result = await future
+        result = await _resolve_or_drop(request, future, r)
+    except ClientGone:
+        # Nothing will read this reply, so the status is only for the access log
+        return Response(status_code=499)
     except Exception as e:
         return JSONResponse(
             status_code=502,
@@ -584,13 +643,17 @@ async def proxy(full_path: str, request: Request):
     if is_streaming:
         queue = cast("asyncio.Queue[bytes | Exception | None]", result)
         async def stream_chunks():
-            while True:
-                chunk = await queue.get()
-                if chunk is None:
-                    break
-                if isinstance(chunk, Exception):
-                    raise chunk
-                yield chunk
+            """Drains the router's queue, cancelling the forward if the client leaves."""
+            try:
+                while True:
+                    chunk = await queue.get()
+                    if chunk is None:
+                        break
+                    if isinstance(chunk, Exception):
+                        raise chunk
+                    yield chunk
+            finally:
+                r.cancel_request(future)
         return StreamingResponse(stream_chunks(), media_type="text/event-stream")
     else:
         response = cast(httpx.Response, result)
