@@ -486,22 +486,15 @@ async def router_translate(request: Request):
         enqueue_time = time.time()
         async def stream_chunks():
             # Wait for scheduler to pick up the request, checking disconnect while queued
-            result = None
-            while result is None:
-                try:
-                    result = await asyncio.wait_for(future, timeout=0.5)
-                except asyncio.TimeoutError:
-                    if await request.is_disconnected():
-                        wait_time = time.time() - enqueue_time
-                        print(f"[API] client disconnected while queued after {wait_time:.1f}s, cancelling", flush=True)
-                        future.cancel()
-                        return
-                    continue
-                except asyncio.CancelledError:
+            while not future.done():
+                await asyncio.sleep(0.5)
+                if await request.is_disconnected():
                     wait_time = time.time() - enqueue_time
-                    print(f"[API] request cancelled while queued after {wait_time:.1f}s", flush=True)
+                    print(f"[API] client disconnected while queued after {wait_time:.1f}s, cancelling", flush=True)
+                    future.cancel()
                     return
 
+            result = future.result()
             queue_wait = time.time() - enqueue_time
             if queue_wait > 1.0:
                 print(f"[API] request dequeued after {queue_wait:.1f}s wait", flush=True)
@@ -626,25 +619,20 @@ async def proxy(full_path: str, request: Request):
         enqueue_time = time.time()
         async def stream_chunks():
             # Wait for scheduler to pick up the request, checking disconnect while queued
-            result = None
-            while result is None:
-                try:
-                    result = await asyncio.wait_for(future, timeout=0.5)
-                except asyncio.TimeoutError:
-                    if await request.is_disconnected():
-                        wait_time = time.time() - enqueue_time
-                        print(f"[API] client disconnected while queued after {wait_time:.1f}s, cancelling", flush=True)
-                        future.cancel()
-                        return
-                    continue
-                except asyncio.CancelledError:
+            while not future.done():
+                await asyncio.sleep(0.5)
+                if await request.is_disconnected():
                     wait_time = time.time() - enqueue_time
-                    print(f"[API] request cancelled while queued after {wait_time:.1f}s", flush=True)
+                    print(f"[API] client disconnected while queued after {wait_time:.1f}s, cancelling", flush=True)
+                    future.cancel()
                     return
-                except Exception as e:
-                    print(f"[API] error while queued: {e}", flush=True)
-                    yield f"data: {json.dumps({'error': str(e)})}\n\n"
-                    return
+
+            try:
+                result = future.result()
+            except Exception as e:
+                print(f"[API] error while queued: {e}", flush=True)
+                yield f"data: {json.dumps({'error': str(e)})}\n\n"
+                return
 
             queue_wait = time.time() - enqueue_time
             if queue_wait > 1.0:
