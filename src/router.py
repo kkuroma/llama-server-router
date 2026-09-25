@@ -1321,6 +1321,13 @@ class LLMRouter:
                                     "default": _reasoning_effort_default(raw_effort, levels),
                                 }
                             }
+                        cost = cfg.get("cost")
+                        if cost:
+                            row["pricing"] = {
+                                "input": cost.get("input", 0),
+                                "output": cost.get("output", 0),
+                                "cache_read": cost.get("cached_input", 0),
+                            }
                         data.append(row)
                     return {"object": "list", "data": data}
             except (httpx.HTTPError, ValueError) as exc:
@@ -1346,6 +1353,13 @@ class LLMRouter:
                         "levels": levels,
                         "default": _reasoning_effort_default(raw_effort, levels),
                     }
+                }
+            cost = cfg.get("cost")
+            if cost:
+                entry["pricing"] = {
+                    "input": cost.get("input", 0),
+                    "output": cost.get("output", 0),
+                    "cache_read": cost.get("cached_input", 0),
                 }
             data.append(entry)
         return {"object": "list", "data": data}
