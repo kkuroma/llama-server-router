@@ -11,6 +11,7 @@ from typing import Any, NotRequired, TypedDict, cast
 import httpx
 
 import aiosqlite
+from api_addon import build_report
 
 HISTORY_DB_PATH = os.environ.get("HISTORY_DB_PATH", "/webui/monitor/history.db")
 
@@ -29,7 +30,6 @@ class ModelCfg(TypedDict):
     """One model's entry in the router config's LLM section."""
     num_instance: int
     gpus: NotRequired[list[int] | int | str]
-    reasoning_effort: NotRequired[dict[str, Any]]
 
 
 class RouterSettings(TypedDict, total=False):
@@ -162,37 +162,6 @@ async def _fetch_model_reports(port: int) -> dict[str, dict[str, Any]]:
         }
 
 
-def _reasoning_effort_levels(cfg: Any) -> list[str] | None:
-    """
-    Extracts the reasoning effort levels from a model config entry
-
-    Args:
-        cfg: The raw reasoning_effort value from the config (dict with "options")
-
-    Returns:
-        The list of levels, or None if not configured
-    """
-    if isinstance(cfg, dict):
-        return cfg.get("options")
-    return None
-
-
-def _reasoning_effort_default(cfg: Any, levels: list[str]) -> str:
-    """
-    Extracts the default reasoning effort level from a model config entry
-
-    Args:
-        cfg: The raw reasoning_effort value from the config
-        levels: The resolved list of levels (used for fallback)
-
-    Returns:
-        The default level
-    """
-    if isinstance(cfg, dict):
-        return cfg.get("default", levels[0] if levels else "")
-    return ""
-
-
 def _token_counts(data: dict[str, Any]) -> tuple[int, int, int]:
     """
     Reads the processed, generated and reused token counts out of one reply
@@ -257,6 +226,21 @@ class LLMRouter:
             print(f"[ROUTER] unknown EVICTION_POLICY {eviction_policy!r}, falling back to 'lru'", flush=True)
             eviction_policy = "lru"
         self.EVICTION_POLICY = eviction_policy
+        # Load optional models.json for API addon layer (reasoning_effort, pricing, etc.)
+        self.models_config: dict[str, Any] = {}
+        # Try common paths: same dir as config, or explicit env var
+        models_config_path = os.environ.get("MODELS_CONFIG_PATH")
+        if not models_config_path:
+            models_config_path = os.path.join(os.path.dirname(router_config_path), "models.json")
+        if os.path.exists(models_config_path):
+            try:
+                with open(models_config_path, "r") as f:
+                    loaded = json.load(f)
+                    if isinstance(loaded, dict):
+                        self.models_config = loaded
+                        print(f"[ROUTER] loaded models.json ({len(loaded)} models)", flush=True)
+            except (json.JSONDecodeError, OSError) as e:
+                print(f"[ROUTER] failed to load models.json: {e}, using empty config", flush=True)
 
         # Each model is pinned to a set of GPU ids, so residency and eviction are per GPU.
         self.num_gpus = self._detect_num_gpus(router_settings.get("NUM_GPUS"))
@@ -267,7 +251,6 @@ class LLMRouter:
         self.model_loaded_at: dict[str, float] = {} # model -> ts of last successful load
         self.model_last_used: dict[str, float] = {} # model -> ts of last dispatched request (or load)
         self._context_windows: dict[str, int] | None = None # cached per-model effective context (see model_context_windows)
-        self._max_output_tokens: dict[str, int] | None = None # cached per-model n-predict (see model_max_output_tokens)
 
         self.status: Status = Status.INACTIVE
         self.processes: dict[int, subprocess.Popen[bytes]] = {} # port -> Popen
@@ -534,47 +517,6 @@ class LLMRouter:
         self._context_windows = windows
         return windows
 
-    def model_max_output_tokens(self) -> dict[str, int]:
-        """
-        Returns the n-predict value for each configured model
-
-        Reads n-predict from the presets INI, falling back to the "[*]" global
-        section. Models whose n-predict cannot be resolved are omitted. The
-        presets file is parsed once and the result cached.
-
-        Returns:
-            A dict mapping model id to its max output tokens
-        """
-        if self._max_output_tokens is not None:
-            return self._max_output_tokens
-
-        tokens: dict[str, int] = {}
-        parser = configparser.ConfigParser(inline_comment_prefixes=("#", ";"), strict=False)
-        try:
-            read = parser.read(self.llama_presets_path)
-        except configparser.Error as exc:
-            print(f"[ROUTER] could not parse presets {self.llama_presets_path!r}: {exc}", flush=True)
-            read = []
-
-        if read:
-            def _preset_value(model_id: str, keys: tuple[str, ...]) -> str | None:
-                for section in (model_id, "*"):
-                    for key in keys:
-                        if parser.has_option(section, key):
-                            return parser.get(section, key)
-                return None
-
-            for model_id in self.router_config["LLM"]:
-                raw = _preset_value(model_id, ("n-predict",))
-                if raw is None:
-                    continue
-                try:
-                    tokens[model_id] = int(raw)
-                except ValueError:
-                    continue
-
-        self._max_output_tokens = tokens
-        return tokens
 
     def _plan_evictions(self, model_id: str, loaded: set[str]) -> set[str]:
         """
@@ -1277,61 +1219,35 @@ class LLMRouter:
         """
         Builds the /v1/models listing, proxying a live llama.cpp server when possible
 
-        Proxies /v1/models from a live supervisor (a loaded replica, else the idle
-        metadata supervisor) so the listing carries llama.cpp's real fields
-        (modalities, source, and per-model meta for whatever is loaded), then
-        overlays our per-request context_length (c / parallel) since llama.cpp
-        does not report that. Falls back to a synthesized listing (ids +
-        context_length) when no supervisor is reachable.
 
         Returns:
             An OpenAI-style {"object": "list", "data": [...]} dict
         """
         windows = self.model_context_windows()
-        max_tokens = self.model_max_output_tokens()
         configured = list(self.router_config["LLM"])
         port = self._proxy_port()
+        upstream: dict[str, Any] | None = None
         if port is not None:
             try:
                 async with httpx.AsyncClient() as client:
                     resp = await client.get(f"http://127.0.0.1:{port}/v1/models", timeout=5.0)
                 if resp.status_code == 200:
-                    upstream = {row["id"]: row for row in resp.json().get("data", []) if "id" in row}
-                    data = []
-                    for mid in configured:
-                        row = dict(upstream.get(mid, {"id": mid, "object": "model"}))
-                        row.pop("status", None)
-                        row.pop("source", None)
-                        row.pop("can_remove", None)
-                        ctx = windows.get(mid)
-                        if ctx is not None:
-                            row["context_length"] = ctx
-                            if not row.get("meta"):
-                                row["meta"] = {"n_ctx_train": ctx, "n_ctx": ctx}
-                        max_out = max_tokens.get(mid)
-                        if max_out is not None:
-                            row["max_output_tokens"] = max_out
-                        cfg = self.router_config["LLM"][mid]
-                        raw_effort = cfg.get("reasoning_effort")
-                        levels = _reasoning_effort_levels(raw_effort)
-                        if levels:
-                            row["capabilities"] = {
-                                "reasoning_effort": {
-                                    "levels": levels,
-                                    "default": _reasoning_effort_default(raw_effort, levels),
-                                }
-                            }
-                        cost = cfg.get("cost")
-                        if cost:
-                            row["pricing"] = {
-                                "input": cost.get("input", 0),
-                                "output": cost.get("output", 0),
-                                "cache_read": cost.get("cached_input", 0),
-                            }
-                        data.append(row)
-                    return {"object": "list", "data": data}
+                    upstream = resp.json()
             except (httpx.HTTPError, ValueError) as exc:
                 print(f"[ROUTER] models_report proxy from port {port} failed: {exc}; synthesizing", flush=True)
+        if self.models_config:
+            return build_report(upstream, self.models_config)
+        # No addon layer: filter to configured models + add context_length.
+        if upstream is not None:
+            upstream_rows = {row["id"]: row for row in upstream.get("data", []) if "id" in row}
+            data = []
+            for mid in configured:
+                row = dict(upstream_rows.get(mid, {"id": mid, "object": "model"}))
+                ctx = windows.get(mid)
+                if ctx is not None:
+                    row["context_length"] = ctx
+                data.append(row)
+            return {"object": "list", "data": data}
         # Fallback: synthesize from config + presets (no live supervisor).
         created = int(time.time())
         data = []
@@ -1341,26 +1257,6 @@ class LLMRouter:
             if ctx is not None:
                 entry["context_length"] = ctx
                 entry["meta"] = {"n_ctx_train": ctx, "n_ctx": ctx}
-            max_out = max_tokens.get(mid)
-            if max_out is not None:
-                entry["max_output_tokens"] = max_out
-            cfg = self.router_config["LLM"][mid]
-            raw_effort = cfg.get("reasoning_effort")
-            levels = _reasoning_effort_levels(raw_effort)
-            if levels:
-                entry["capabilities"] = {
-                    "reasoning_effort": {
-                        "levels": levels,
-                        "default": _reasoning_effort_default(raw_effort, levels),
-                    }
-                }
-            cost = cfg.get("cost")
-            if cost:
-                entry["pricing"] = {
-                    "input": cost.get("input", 0),
-                    "output": cost.get("output", 0),
-                    "cache_read": cost.get("cached_input", 0),
-                }
             data.append(entry)
         return {"object": "list", "data": data}
 

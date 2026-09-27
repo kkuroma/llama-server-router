@@ -5,13 +5,11 @@ let
 
   iniAtom = with lib.types; oneOf [ bool int float str ];
 
-  # Router JSON: pick num_instance + gpus + reasoning_effort per model out of the shared `models` attrset.
+  # Router JSON: only num_instance + gpus per model (scheduler/placement).
   routerConfig = pkgs.writeText "llama-router-config.json" (builtins.toJSON {
     LLM = lib.mapAttrs (_: m:
       { num_instance = m.num_instance or 1; }
       // lib.optionalAttrs (m ? gpus) { inherit (m) gpus; }
-      // lib.optionalAttrs (m ? reasoning_effort) { inherit (m) reasoning_effort; }
-      // lib.optionalAttrs (m ? reasoning_effort_default) { inherit (m) reasoning_effort_default; }
     ) cfg.models;
     ROUTER = {
       MAX_MODELS_PER_GPU = cfg.maxModelsPerGpu;
@@ -25,19 +23,31 @@ let
     "llama-server-executable" = "${cfg.llamaCpp}/bin/llama-server";
   });
 
-  # Preset INI: drop num_instance + gpus + reasoning_effort + reasoning_effort_default
-  # (router-only) from each model, prepend the "[*]" globals. Physical placement is NOT
-  # emitted as a `device` key: the router masks each llama-server to its `gpus` via
-  # CUDA_VISIBLE_DEVICES, which both pins compute and keeps ggml's per-device
-  # context/buffers off other GPUs. `gpus` is therefore the single source of truth
-  # for placement.
+  # Models JSON: API addon params only (reasoning_effort, cost, meta).
+  # Optional: if absent, the router passes through the upstream /v1/models unchanged.
+  modelsConfig = pkgs.writeText "llama-router-models.json" (builtins.toJSON (
+    lib.mapAttrs (_: m:
+      lib.filterAttrs (_: v: v != {}) (
+        lib.optionalAttrs (m ? reasoning_effort) { inherit (m) reasoning_effort; }
+        // lib.optionalAttrs (m ? cost) { inherit (m) cost; }
+        // lib.optionalAttrs (m ? meta) { inherit (m) meta; }
+      )
+    ) cfg.models
+  ));
+
+  # Preset INI: drop router-only keys (num_instance, gpus) and addon-only keys
+  # (reasoning_effort, cost, meta) from each model; prepend the "[*]" globals.
+  # Physical placement is NOT emitted as a `device` key: the router masks each
+  # llama-server to its `gpus` via CUDA_VISIBLE_DEVICES, which both pins compute
+  # and keeps ggml's per-device context/buffers off other GPUs. `gpus` is therefore
+  # the single source of truth for placement.
   #
   # A per-model cache cap lands here rather than in "[*]", and an explicit `cram`
   # on the model still wins because it merges last.
   mkPreset = name: m:
     lib.optionalAttrs (cfg.promptCache.ramMiBPerModel ? ${name})
       { cram = cfg.promptCache.ramMiBPerModel.${name}; }
-    // removeAttrs m [ "num_instance" "gpus" "reasoning_effort" "reasoning_effort_default" ];
+    // removeAttrs m [ "num_instance" "gpus" "reasoning_effort" "cost" ];
   presetsFormat = pkgs.formats.ini {
     mkKeyValue = lib.generators.mkKeyValueDefault {} " = ";
   };
@@ -203,14 +213,17 @@ in
     };
 
     models = lib.mkOption {
-      type = lib.types.attrsOf (lib.types.attrsOf (lib.types.either iniAtom (lib.types.listOf (lib.types.either lib.types.int lib.types.str))));
+      type = lib.types.attrsOf (lib.types.attrsOf (lib.types.either iniAtom
+        (lib.types.listOf (lib.types.either lib.types.int lib.types.str))
+        (lib.types.attrsOf (lib.types.either iniAtom (lib.types.listOf (lib.types.either lib.types.int lib.types.str))))));
       default = {};
       example = lib.literalExpression ''
         {
           "Qwen3-4B" = {
             num_instance = 1;
             gpus = [ 0 1 ];
-            reasoning_effort = [ "low" "medium" "xhigh" ];
+            reasoning_effort = { options = [ "low" "medium" "xhigh" ]; default = "xhigh" };
+            cost = { input = 0.4; cached_input = 0.15; output = 2.5; cache_write = 0; };
             model = "/data/llm-models/Qwen3-4B-Q8_0.gguf";
             c = 65536;
             parallel = 4;
@@ -219,16 +232,25 @@ in
       '';
       description = ''
         Model presets. Each attribute becomes a llama.cpp presets.ini section;
-        `num_instance`, `gpus`, `reasoning_effort`, and `reasoning_effort_default`
-        are consumed by the router and stripped from the INI. `gpus` pins the model
-        to GPU ids (omitted = GPU 0 only; "all" or -1 = every GPU) and is the single
-        source of truth for physical placement: the router masks each llama-server
-        to those GPUs via CUDA_VISIBLE_DEVICES, so no `device` key is emitted or
-        needed. Set `reasoning_effort` to a list of supported effort levels (e.g.
-        [ "low" "medium" "xhigh" ] for Qwen 3.8) to advertise the model's reasoning
-        capabilities via the /v1/models endpoint. Optionally set
-        `reasoning_effort_default` to override which level is advertised as the
-        default (defaults to the first level in the list).
+        `num_instance`, `gpus`, `reasoning_effort`,
+        and `cost` are consumed by the router and stripped from the INI.
+        `gpus` pins the model to GPU ids (omitted = GPU 0 only; "all" or -1 =
+        every GPU) and is the single source of truth for physical placement:
+        the router masks each llama-server to those `gpus` via
+        CUDA_VISIBLE_DEVICES, so no `device` key is emitted or needed.
+
+        `reasoning_effort` is an attrset with `options` (the supported
+        effort levels, e.g. [ "low" "medium" "xhigh" ]), `disable` (the
+        keyword for how thinking-off is expressed on the wire: "none" sends
+        reasoning_effort "none", "lowest" clamps off to the lowest level,
+        "qwen" sends chat_template_kwargs.enable_thinking false; omit when
+        the model cannot disable thinking), and `default` (the advertised
+        default level). It is advertised verbatim via the /v1/models endpoint
+        as the row's top-level `reasoning_effort` field, and the model is
+        additionally listed under `supported_parameters` as the request
+        parameter name `reasoning`.
+        `cost` ({ input, cached_input, output, cache_write } in $/1M tokens)
+        is advertised as the row's `pricing`.
       '';
     };
 
@@ -309,6 +331,7 @@ in
       environment = {
         ROUTER_CONFIG_PATH = "${routerConfig}";
         LLAMA_PRESETS_PATH = "${presetsIni}";
+        MODELS_CONFIG_PATH = "${modelsConfig}";
         ROUTER_HOST = cfg.host;
         HISTORY_DB_PATH = "/var/lib/llama-router/monitor/history.db";
       };

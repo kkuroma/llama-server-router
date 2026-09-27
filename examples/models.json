@@ -1,0 +1,34 @@
+{
+  "Qwen3.8-27B": {
+    "architecture": {
+      "tokenizer": "qwen3"
+    },
+    "context_length": 262144,
+    "max_output_tokens": 32000,
+    "reasoning_effort": {
+      "options": ["low", "medium", "xhigh"],
+      "default": "xhigh",
+      "disable": false
+    },
+    "pricing": {
+      "input": 0.4,
+      "cached_input": 0.15,
+      "output": 2.5,
+      "cache_write": 0
+    },
+    "parameters": [ 
+      "stop", "tools", "tool_choice", "temperature", 
+      "top_k", "top_p", "min_p", "frequency_penalty", 
+      "presence_penalty", "repetition_penalty", "reasoning_effort"
+    ]
+  },
+  "nex-n2.5-mini": {
+    "context_length": 262144,
+    "reasoning_effort": {
+      "options": ["medium", "high"],
+      "default": "medium",
+      "disable": "none"
+    },
+    "pricing": { "input": 0, "cached_input": 0, "output": 0, "cache_write": 0 }
+  }
+}

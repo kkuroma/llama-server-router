@@ -149,14 +149,15 @@ Import `llama-router.nixosModules.default` into your host and configure:
       ctv = "q4_0";
     };
 
-    # each model becomes a presets.ini section; num_instance, gpus, and
-    # reasoning_effort are router-only (gpus masks the process via
+    # each model becomes a presets.ini section; num_instance, gpus,
+    # reasoning_effort, and cost are router-only (gpus masks the process via
     # CUDA_VISIBLE_DEVICES; no device key)
     models = {
       "Qwen3-4B" = {
         num_instance = 1;
         gpus = [ 0 1 ];  # omit = GPU 0; "all" or -1 = every GPU
-        reasoning_effort = [ "low" "medium" "xhigh" ];  # supported effort levels
+        reasoning_effort = { options = [ "low" "medium" "xhigh" ]; default = "xhigh" };  # advertised via /v1/models; disable = "none" allows thinking-off
+        cost = { input = 0.4; cached_input = 0.15; output = 2.5; };  # $/1M tokens, advertised as pricing
         model = "/data/llm-models/Qwen3-4B-Q8_0.gguf";
         c = 65536;
         b = 4096;

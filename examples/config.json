@@ -1,19 +1,19 @@
 {
     "LLM": {
-        "GPT-OSS-20B": {
-            "num_instance": 1,
-            "gpus": [0, 1]
+        "GPT-OSS-20B": { 
+            "num_instance": 1, 
+            "gpus": [0, 1] 
         },
-        "GLM-4.7-Flash": {
-            "num_instance": 1,
-            "gpus": [2]
+        "GLM-4.7-Flash": { 
+            "num_instance": 1, 
+            "gpus": [2] 
         },
-        "Qwen3.8-27B": {
+        "Qwen3.8-27B": { 
             "num_instance": 2,
-            "reasoning_effort": { "options": ["low", "medium", "xhigh"], "default": "xhigh" }
+            "gpus": [0, 2] 
         },
-        "Big-Model": {
-            "num_instance": 1,
+        "Big-Model": { 
+            "num_instance": 1, 
             "gpus": "all"
         }
     },
