@@ -22,7 +22,7 @@ A router that sits in front of your `llama.cpp`'s server that handles seamless m
 | Scheduling granularity  | whole-server                     | per GPU (a swap on GPU 0 does not block GPU 1) |
 | Replicas per model      | 1                                | `num_instance`, least-busy routing             |
 
-`llama-router` only speaks `llama.cpp`, which is intentional. `vLLM` does not play well with hot-swapping and uses a messier environment, and we've decided against using it in a few-user homelab situation. If you want vLLM, whisper, and a single Go binary, use `llama-swap`. If you own a pile of small GPUs and want one endpoint that figure out where requests go without needing to manually manage VRAM states and never drops a request, use `llama-server`. Proven by months of stable use as "just an OpenAI compatible provider" you don't need to worry again. Perfectly compatible with LiteLLM, Librechat, OpenCode, or any local LLM tool.
+`llama-router` only speaks `llama.cpp`, which is intentional. `vLLM` does not play well with hot-swapping on odd numbers of gpu deployments and uses a messier environment, and we've decided against using it in a few-user homelab situation. If you want vLLM, whisper, and a single Go binary, use `llama-swap`. If you own a pile of small GPUs and want one endpoint that figure out where requests go without needing to manually manage VRAM states and never drops a request, use `llama-server`. Proven by months of stable use as "just an OpenAI compatible provider" you don't need to worry again. Perfectly compatible with LiteLLM, Librechat, OpenCode, or any local LLM tool.
 
 ## Benchmarks
 
