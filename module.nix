@@ -47,7 +47,7 @@ let
   mkPreset = name: m:
     lib.optionalAttrs (cfg.promptCache.ramMiBPerModel ? ${name})
       { cram = cfg.promptCache.ramMiBPerModel.${name}; }
-    // removeAttrs m [ "num_instance" "gpus" "reasoning_effort" "cost" ];
+    // removeAttrs m [ "num_instance" "gpus" "reasoning_effort" "cost" "meta" ];
   presetsFormat = pkgs.formats.ini {
     mkKeyValue = lib.generators.mkKeyValueDefault {} " = ";
   };
@@ -213,16 +213,18 @@ in
     };
 
     models = lib.mkOption {
-      type = lib.types.attrsOf (lib.types.attrsOf (lib.types.either iniAtom
+      type = lib.types.attrsOf (lib.types.attrsOf (lib.types.oneOf [
+        iniAtom
         (lib.types.listOf (lib.types.either lib.types.int lib.types.str))
-        (lib.types.attrsOf (lib.types.either iniAtom (lib.types.listOf (lib.types.either lib.types.int lib.types.str))))));
+        (lib.types.attrsOf (lib.types.either iniAtom (lib.types.listOf (lib.types.either lib.types.int lib.types.str))))
+      ]));
       default = {};
       example = lib.literalExpression ''
         {
           "Qwen3-4B" = {
             num_instance = 1;
             gpus = [ 0 1 ];
-            reasoning_effort = { options = [ "low" "medium" "xhigh" ]; default = "xhigh" };
+            reasoning_effort = { options = [ "low" "medium" "xhigh" ]; default = "xhigh"; };
             cost = { input = 0.4; cached_input = 0.15; output = 2.5; cache_write = 0; };
             model = "/data/llm-models/Qwen3-4B-Q8_0.gguf";
             c = 65536;
