@@ -145,9 +145,9 @@ def pricing_report(cfg: Any) -> dict[str, Any] | None:
     if not isinstance(cfg, dict):
         return None
     return {
-        "input": cfg.get("input", 0),
-        "output": cfg.get("output", 0),
-        "cache_read": cfg.get("cached_input", 0),
+        "prompt": cfg.get("input", 0),
+        "completion": cfg.get("output", 0),
+        "input_cache_read": cfg.get("cache_read", 0),
         "cache_write": cfg.get("cache_write", 0),
     }
 
