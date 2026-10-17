@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>LLaMa Router - Embeddings</title>
+  <!-- theme.js is loaded synchronously and init()'d here so the saved palette
+       applies before first paint (no flash). The dashboard's stylesheet supplies
+       the cards and rows, so this page only adds its own few classes. -->
+  <link rel="preload" href="/webui/fonts/GoogleSansFlex.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="/webui/theme.css" />
+  <link rel="stylesheet" href="/dash/assets/css/dash.css" />
+  <script src="/webui/theme.js"></script>
+  <script>window.LRTheme.init();</script>
+  <script src="https://cdn.jsdelivr.net/npm/vue@3/dist/vue.global.prod.js"></script>
+  <style>
+    .embed-main { max-width: 1100px; flex-direction: column; overflow: auto; }
+    .embed-card { flex-shrink: 0; }
+    .facts { display: flex; flex-wrap: wrap; gap: 0.35rem 0.9rem; font-size: 0.66rem; opacity: 0.75; }
+    .facts b { font-weight: 600; opacity: 0.6; text-transform: uppercase; letter-spacing: 0.04em; font-size: 0.56rem; margin-right: 0.25rem; }
+    .row-btns { display: flex; gap: 0.35rem; align-self: center; }
+    .error-line { font-size: 0.66rem; color: var(--red); }
+    .note { font-size: 0.7rem; opacity: 0.55; }
+    .try-row { display: flex; gap: 0.5rem; align-items: stretch; flex-wrap: wrap; }
+    .try-row textarea {
+      flex: 1; min-width: 240px; min-height: 4.5rem; resize: vertical; font: inherit; font-size: 0.75rem;
+      padding: 0.5rem; border-radius: 0.5rem; border: 1px solid var(--surface2);
+      background: var(--base); color: var(--text);
+    }
+    .try-side { display: flex; flex-direction: column; gap: 0.4rem; }
+    .result { font-size: 0.72rem; }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <div class="lr-navbar">
+      <div class="lr-brand">
+        <span class="lr-brand-name">LLaMa Router</span>
+        <div class="brand-status mono">
+          <span class="dim">(</span>
+          <span class="status-dot" :style="{ background: loadedCount ? pal().green : pal().surface2 }"></span>
+          <span class="status-name">{{ loadedCount }}/{{ models.length }} loaded</span>
+          <span class="dim">)</span>
+        </div>
+      </div>
+      <div class="nav-right">
+        <nav class="lr-nav-links">
+          <a href="/chat" class="nav-link">Chat</a>
+          <a href="/dash" class="nav-link">Dashboard</a>
+          <a href="/translate" class="nav-link">Translate</a>
+          <a href="/embed" class="nav-link active">Embeddings</a>
+        </nav>
+        <details class="settings-menu">
+          <summary class="settings-toggle" title="Appearance">Aa</summary>
+          <div class="settings-body">
+            <div class="settings-label">Palette</div>
+            <div class="settings-row">
+              <button v-for="name in themeNames" :key="name" class="swatch"
+                :class="{ active: name === ui.theme }" :style="swatchStyle(name)"
+                :title="name" @click.prevent="selectTheme(name)"></button>
+            </div>
+            <div class="settings-label">Mode</div>
+            <div class="seg">
+              <button v-for="opt in modeOptions" :key="opt.value" class="seg-btn"
+                :class="{ active: opt.value === ui.variantMode }"
+                @click.prevent="selectVariant(opt.value)">{{ opt.label }}</button>
+            </div>
+            <div class="settings-label">Text size</div>
+            <div class="seg">
+              <button v-for="opt in sizeOptions" :key="opt.value" class="seg-btn"
+                :class="{ active: opt.value === ui.fontSize }"
+                @click.prevent="selectFontSize(opt.value)">{{ opt.label }}</button>
+            </div>
+          </div>
+        </details>
+      </div>
+    </div>
+
+    <div class="dash-main embed-main">
+      <div class="card embed-card">
+        <div class="card-head">
+          <h2 class="panel-title">Embedding models</h2>
+          <span class="note">Each runs as its own llama-server beside the LLMs, which never evict it.</span>
+        </div>
+        <div class="model-list">
+          <div v-for="m in models" :key="m.id" class="model-row"
+            :style="{ borderLeftColor: m.status === 'loaded' ? modelColor(m.id) : pal().overlay0 }">
+            <div class="model-info">
+              <div class="model-line">
+                <span class="status-dot" :class="{ pulse: m.status === 'loading' }" :style="{ background: statusColor(m.status) }"></span>
+                <span class="model-name mono" :title="m.id" :style="{ color: modelColor(m.id) }">{{ m.id }}</span>
+                <span class="model-tag" :style="{ color: statusColor(m.status), borderColor: statusColor(m.status) }">{{ m.status }}</span>
+                <span v-if="m.autostart" class="model-tag" :style="{ color: pal().subtext0, background: pal().surface1 }">autostart</span>
+              </div>
+              <div class="facts mono">
+                <span><b>port</b>{{ m.port }}</span>
+                <span v-if="m.pid"><b>pid</b>{{ m.pid }}</span>
+                <span class="gpu-group">
+                  <b>gpu</b>
+                  <span v-for="g in m.gpus" :key="g" class="gpu-num" :style="{ color: gpuColor(g) }">{{ g }}</span>
+                </span>
+                <span v-if="m.started_at"><b>up</b>{{ uptime(m.started_at) }}</span>
+                <span><b>requests</b>{{ fmtNum(m.requests) }}</span>
+                <span><b>inputs</b>{{ fmtNum(m.inputs) }}</span>
+                <span v-if="m.ms_per_input !== null"><b>ms / input</b>{{ m.ms_per_input.toFixed(2) }}</span>
+              </div>
+              <div v-if="m.error && m.status !== 'loaded'" class="error-line mono">{{ m.error }}</div>
+            </div>
+            <div class="row-btns">
+              <button class="row-btn" :disabled="!!busy[m.id] || m.status === 'loading'" @click="act(m, m.status === 'loaded' ? 'unload' : 'load')"
+                :style="{ borderColor: modelColor(m.id), color: modelColor(m.id) }">
+                <span v-if="busy[m.id] === 'load' || busy[m.id] === 'unload'" class="spinner"></span>
+                <span v-else>{{ m.status === 'loaded' ? 'Unload' : 'Load' }}</span>
+              </button>
+              <button class="row-btn" :disabled="!!busy[m.id] || m.status !== 'loaded'" @click="act(m, 'restart')"
+                title="Replace the process with a fresh one">
+                <span v-if="busy[m.id] === 'restart'" class="spinner"></span>
+                <span v-else>Restart</span>
+              </button>
+            </div>
+          </div>
+          <div v-if="models.length === 0" class="empty">No embedding models configured</div>
+        </div>
+      </div>
+
+      <div class="card embed-card">
+        <div class="card-head">
+          <h2 class="panel-title">Try it</h2>
+          <span class="note">One text through the router, timed end to end.</span>
+        </div>
+        <div class="try-row">
+          <textarea v-model="text" placeholder="search_query: graph neural networks for molecules"></textarea>
+          <div class="try-side">
+            <select class="model-select mono" v-model="testModel">
+              <option v-for="m in models" :key="m.id" :value="m.id">{{ m.id }}</option>
+            </select>
+            <button class="action-btn green" :disabled="!testModel || !text || testing" @click="test">
+              <span v-if="testing" class="spinner"></span>
+              <span v-else>Embed</span>
+            </button>
+          </div>
+        </div>
+        <div v-if="result" class="result mono">
+          <span v-if="result.error" class="error-line">{{ result.error }}</span>
+          <span v-else>{{ result.dims }} dimensions in {{ result.ms }} ms, starting [{{ result.head.map(x => x.toFixed(4)).join(', ') }}, ...]</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script type="module">
+    import { pal, modelColor, gpuColor } from '/dash/assets/js/colors.js';
+    import { fmtNum } from '/dash/assets/js/format.js';
+
+    const T = window.LRTheme;
+    const { createApp, ref, reactive, computed, onMounted, onUnmounted } = Vue;
+
+    const post = (url, body) => fetch(url, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+
+    createApp({
+      setup() {
+        const ui = reactive({ ...T.state });
+        const themeNames = T.themeNames;
+        const modeOptions = [
+          { value: 'light', label: 'Light' }, { value: 'dark', label: 'Dark' }, { value: 'system', label: 'Auto' },
+        ];
+        const sizeOptions = [
+          { value: 'small', label: 'S' }, { value: 'medium', label: 'M' },
+          { value: 'large', label: 'L' }, { value: 'xlarge', label: 'XL' },
+        ];
+        const swatchStyle = (name) => {
+          const t = T.THEMES[name];
+          return { background: `linear-gradient(135deg, ${t.light.primary} 50%, ${t.dark.primary} 50%)` };
+        };
+        const tick = ref(0);
+        const selectTheme = (n) => { T.setTheme(n); ui.theme = T.state.theme; };
+        const selectVariant = (m) => { T.setVariant(m); ui.variantMode = T.state.variantMode; };
+        const selectFontSize = (s) => { T.setFontSize(s); ui.fontSize = T.state.fontSize; };
+
+        const models = ref([]);
+        const busy = reactive({});
+        const text = ref('');
+        const testModel = ref('');
+        const testing = ref(false);
+        const result = ref(null);
+        const now = ref(Date.now() / 1000);
+        let timer = null;
+
+        const loadedCount = computed(() => models.value.filter(m => m.status === 'loaded').length);
+
+        function statusColor(s) {
+          tick.value;
+          const p = pal();
+          return { loaded: p.green, loading: p.yellow, failed: p.red }[s] || p.overlay0;
+        }
+
+        function uptime(ts) {
+          const s = Math.max(0, Math.floor(now.value - ts));
+          if (s < 3600) return `${Math.floor(s / 60)}m`;
+          if (s < 86400) return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
+          return `${Math.floor(s / 86400)}d ${Math.floor((s % 86400) / 3600)}h`;
+        }
+
+        async function refresh() {
+          try {
+            const data = await (await fetch('/router/embeddings')).json();
+            models.value = data.data || [];
+            for (const m of models.value) modelColor(m.id);
+            if (!testModel.value && models.value.length) testModel.value = models.value[0].id;
+          } catch {}
+          now.value = Date.now() / 1000;
+        }
+
+        async function act(m, action) {
+          busy[m.id] = action;
+          try {
+            const resp = await post(`/embeddings/${action}`, { model: m.id });
+            if (!resp.ok) {
+              const body = await resp.json().catch(() => ({}));
+              m.error = body?.error?.message || body?.detail || `HTTP ${resp.status}`;
+            }
+          } catch {}
+          delete busy[m.id];
+          await refresh();
+        }
+
+        async function test() {
+          testing.value = true;
+          try {
+            const resp = await post('/router/embeddings/test', { model: testModel.value, text: text.value });
+            const body = await resp.json();
+            result.value = resp.ok ? body : { error: body.detail || `HTTP ${resp.status}` };
+          } catch (e) {
+            result.value = { error: String(e) };
+          }
+          testing.value = false;
+          await refresh();
+        }
+
+        onMounted(async () => {
+          await refresh();
+          timer = setInterval(refresh, 3000);
+          T.onChange(() => { tick.value++; });
+        });
+        onUnmounted(() => clearInterval(timer));
+
+        return {
+          ui, themeNames, modeOptions, sizeOptions, swatchStyle, selectTheme, selectVariant, selectFontSize,
+          models, busy, loadedCount, statusColor, uptime, act, modelColor, gpuColor, fmtNum,
+          pal: () => (tick.value, pal()), text, testModel, testing, result, test,
+        };
+      },
+    }).mount('#app');
+  </script>
+</body>
+</html>

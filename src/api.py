@@ -1,6 +1,7 @@
 import asyncio
 import json
 import re
+import time
 from pathlib import Path
 from typing import TypedDict, cast
 
@@ -37,6 +38,12 @@ class TranslateRequest(TypedDict, total=False):
     text: str
     additionals: str
     stream: bool
+
+
+class EmbedTestRequest(TypedDict, total=False):
+    """Body of the /router/embeddings/test endpoint."""
+    model: str
+    text: str
 
 
 class ProxyBody(TypedDict, total=False):
@@ -206,6 +213,131 @@ async def router_load(body: ModelActionRequest):
             content={"success": False, "error": {"message": str(e), "code": "load_failed"}},
         )
     return {"success": result}
+
+
+# Embedding models, which run as their own processes beside the LLM scheduler
+
+def _embedding_id(r: LLMRouter, body: ModelActionRequest) -> str:
+    """
+    The embedding model a load, unload or restart names
+
+    Raises:
+        HTTPException: 422 if "model" is missing, 404 if it is not an embedding model
+    """
+    model_id = body.get("model")
+    if not model_id:
+        raise HTTPException(status_code=422, detail="Missing 'model' field")
+    if model_id not in r.embeddings:
+        raise HTTPException(status_code=404, detail=f"Embedding model {model_id} not found")
+    return model_id
+
+@app.get("/router/embeddings")
+async def router_embeddings():
+    """Returns every configured embedding model with its process and its recent speed."""
+    return {"object": "list", "data": get_router().embeddings.report()}
+
+@app.post("/embeddings/load")
+async def embeddings_load(body: ModelActionRequest):
+    """
+    Starts an embedding model's process, leaving every LLM where it is
+
+    Returns a 502 with the reason when the process exits or never becomes healthy.
+    """
+    r = get_router()
+    model_id = _embedding_id(r, body)
+    try:
+        await r.embeddings.load(model_id)
+    except RuntimeError as e:
+        return JSONResponse(status_code=502, content={"success": False, "error": {"message": str(e), "code": "load_failed"}})
+    return {"success": True}
+
+@app.post("/embeddings/unload")
+async def embeddings_unload(body: ModelActionRequest):
+    """Stops an embedding model's process, which an autostart model stays out of until loaded again."""
+    r = get_router()
+    await r.embeddings.unload(_embedding_id(r, body))
+    return {"success": True}
+
+@app.post("/embeddings/restart")
+async def embeddings_restart(body: ModelActionRequest):
+    """Replaces an embedding model's process with a fresh one."""
+    r = get_router()
+    model_id = _embedding_id(r, body)
+    try:
+        await r.embeddings.restart(model_id)
+    except RuntimeError as e:
+        return JSONResponse(status_code=502, content={"success": False, "error": {"message": str(e), "code": "load_failed"}})
+    return {"success": True}
+
+@app.post("/router/embeddings/test")
+async def embeddings_test(body: EmbedTestRequest):
+    """
+    Embeds one text with an embedding model and reports the vector size and the time taken
+
+    Raises:
+        HTTPException: 422 without a text, 404 for an unknown model, 502 if the process fails
+    """
+    r = get_router()
+    model_id = _embedding_id(r, {"model": body.get("model", "")})
+    text = body.get("text", "")
+    if not text:
+        raise HTTPException(status_code=422, detail="Missing 'text' field")
+    clock = time.perf_counter()
+    try:
+        resp = await r.embeddings.forward(
+            model_id, "POST", "/v1/embeddings",
+            json.dumps({"model": model_id, "input": [text]}).encode(),
+            {"Content-Type": "application/json"},
+        )
+    except (RuntimeError, httpx.HTTPError) as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    if resp.status_code != 200:
+        raise HTTPException(status_code=resp.status_code, detail=resp.text[:300])
+    vector = resp.json()["data"][0]["embedding"]
+    return {"dims": len(vector), "ms": round(1000 * (time.perf_counter() - clock), 1), "head": vector[:4]}
+
+@app.api_route("/embedding/{model_id}/{path:path}", methods=["GET", "POST"])
+async def embedding_proxy(model_id: str, path: str, request: Request):
+    """
+    Passes any request straight to one embedding model's process, such as /tokenize
+
+    A request with no model field, like /tokenize, cannot be routed by the catch-all,
+    so this names the model in the path instead.
+
+    Raises:
+        HTTPException: 404 for an unknown model, 502 if the process cannot be reached
+    """
+    r = get_router()
+    if model_id not in r.embeddings:
+        raise HTTPException(status_code=404, detail=f"Embedding model {model_id} not found")
+    target = f"/{path}" + (f"?{request.url.query}" if request.url.query else "")
+    try:
+        resp = await r.embeddings.forward(model_id, request.method, target, await request.body(), _forward_headers(request))
+    except (RuntimeError, httpx.HTTPError) as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    return _passthrough(resp)
+
+def _forward_headers(request: Request) -> dict[str, str]:
+    """The incoming headers minus the ones the upstream connection sets itself."""
+    return {k: v for k, v in request.headers.items() if k.lower() not in ("host", "content-length")}
+
+def _passthrough(resp: httpx.Response) -> Response:
+    """An upstream response returned as is, without the headers the body framing owns."""
+    safe = {k: v for k, v in resp.headers.items() if k.lower() not in ("content-length", "transfer-encoding", "content-encoding", "connection")}
+    return Response(content=resp.content, status_code=resp.status_code, media_type=resp.headers.get("content-type"), headers=safe)
+
+@app.get("/embed")
+async def embed_page():
+    """
+    Serves the embeddings single-page app
+
+    Raises:
+        HTTPException: 404 if the page is missing
+    """
+    html_path = Path(__file__).parent / "embed" / "index.html"
+    if not html_path.exists():
+        raise HTTPException(status_code=404, detail="Embeddings page not found")
+    return HTMLResponse(html_path.read_text())
 
 
 # History endpoints
@@ -571,6 +703,20 @@ async def proxy(full_path: str, request: Request):
         A streaming, JSON, or raw response mirroring the upstream reply
     """
     r = get_router()
+    raw_body = await request.body()
+    try:
+        named = cast(ProxyBody, json.loads(raw_body)).get("model")
+    except (json.JSONDecodeError, UnicodeDecodeError, AttributeError):
+        named = None
+    # An embedding model skips the LLM queue and works while the LLM router is stopped
+    if named is not None and named in r.embeddings:
+        target = f"/{full_path}" + (f"?{request.url.query}" if request.url.query else "")
+        try:
+            resp = await r.embeddings.forward(named, request.method, target, raw_body, _forward_headers(request))
+        except (RuntimeError, httpx.HTTPError) as e:
+            return JSONResponse(status_code=502, content={"error": {"message": str(e), "code": "upstream_error"}})
+        return _passthrough(resp)
+
     if r.status.value in ["inactive", "error"]:
         return JSONResponse(
             status_code=503,
@@ -582,7 +728,6 @@ async def proxy(full_path: str, request: Request):
             }
         )
 
-    raw_body = await request.body()
     query_string = request.url.query
     path_with_query = f"/{full_path}"
     if query_string:

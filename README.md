@@ -7,7 +7,8 @@ A router that sits in front of your `llama.cpp`'s server that handles seamless m
 - **It schedules your requests so nothing starves:** Overload it and requests queue and drain, **never a 429 error**. The scheduler batches queued requests by resident model to swap as little as possible, spreads a hot model across `num_instance` replicas by least-busy routing, and force-loads any request that has waited too long so nothing gets starved out.
 - **It rarely, if ever, crashes silently:** Dead replicas are reaped and reload on their next request, and a load that runs out of VRAM fails fast with a reason instead of wedging the GPU in a half-dead state.
 - **Explicit, declarative GPU placement:** give each model a list of GPU ids, then the router manages eviction and device masking. No `CUDA_VISIBLE_DEVICES` needed to be set by hand. Models on disjoint GPUs stay resident and serve at the same time.
-- **Ships a beautiful dashboard:** `/dash` (per-GPU util/VRAM timeline, request history), `/chat` (embedded llama.cpp UI per replica for tok/s testing), `/translate`.
+- **Serves embedding models beside the LLMs:** each embedding model runs as its own `llama-server --embedding` process that the scheduler never counts or evicts, so it shares a GPU with whatever LLM is loaded. See [Embedding models](#embedding-models).
+- **Ships a beautiful dashboard:** `/dash` (per-GPU util/VRAM timeline, request history), `/chat` (embedded llama.cpp UI per replica for tok/s testing), `/translate`, `/embed` (load, unload and restart embedding models).
 
 ## What it does better than LLaMa swap
 
@@ -102,6 +103,26 @@ The `gpus` field on the model's entry (`config.json` `LLM` section, or the `gpus
 
 You do **not** set a `device` key in presets.ini. Masking with `CUDA_VISIBLE_DEVICES` (rather than llama.cpp's `--device`) is deliberate: ggml initializes a CUDA context and reserves buffers on _every visible_ device, so a model pinned via `--device` alone still holds hundreds of MB / a couple GB on the GPUs it isn't computing on — enough to OOM a co-resident model on a tight box. Masking keeps that overhead off other models' GPUs. Because the visible devices are renumbered from 0 inside each process, an absolute `device = CUDA2` would not even resolve; omit it. Unpinned models default to GPU 0 (masked to GPU 0), so on multi-GPU hosts they no longer silently shard across all GPUs.
 
+## Embedding models
+
+An embedding model is not an LLM preset. Each one in the config's `EMBEDDING` section (`embeddingModels` in the NixOS module) runs as its own `llama-server --embedding -m <gguf>` process, managed by the router but outside its scheduler:
+
+- **It never competes with the LLMs.** It takes no per-GPU lock, does not count against `MAX_MODELS_PER_GPU`, and an LLM load never evicts it, so one embedding model and one LLM share a GPU as long as both fit in its memory. Loading and unloading LLMs leaves it running, and so does the dashboard's router Stop.
+- **Requests skip the LLM queue.** A request whose `model` names an embedding model goes straight to that process, and loads it first if it is down. A request with no model field, such as `/tokenize`, reaches it at `/embedding/<model>/<path>` on the router's port.
+- **A fixed `port` keeps direct clients working.** With `port = 11435`, a client that already calls a standalone llama-server there, `/tokenize` included, needs no change.
+- **`autostart` keeps it up.** An autostart model loads with the router and is brought back within seconds whenever its process dies, until it is unloaded by hand. A model whose load failed is retried after a minute.
+- **The `/embed` tab** lists every embedding model with its port, pid, GPUs, uptime, request count and recent milliseconds per input, with Load, Unload and Restart, and a box that embeds one text and times it.
+
+| key | meaning |
+| --- | --- |
+| `model` | path to the gguf |
+| `args` | extra llama-server arguments as on the command line, beyond the `--embedding -m --alias --host --port --metrics` the router passes |
+| `gpus` | GPU ids the process is masked to, as for LLMs, GPU 0 when omitted |
+| `port` | a fixed port, else the next free one from `EMBEDDING-base-port` (`embeddingBasePort`, default 31000) |
+| `autostart` | load at router start and restart when the process dies |
+
+The process gets its own slots, so size `-c` as slots times the model's training context: `-c 8192 --parallel 16` gives 16 slots of 512 for nomic-embed-text-v2-moe. An input longer than one slot is rejected with a 400, so clients truncate by tokens.
+
 ## Usage as a NixOS module
 
 Add the flake input (it follows your nixpkgs):
@@ -162,6 +183,16 @@ Import `llama-router.nixosModules.default` into your host and configure:
         c = 65536;
         b = 4096;
         parallel = 4;
+      };
+    };
+
+    # each embedding model is its own llama-server --embedding process, never evicted by the LLMs
+    embeddingModels = {
+      "nomic-embed-text-v2-moe" = {
+        model = "/data/llm-models/embeddings/nomic-embed-text-v2-moe.gguf";
+        args = [ "-ngl" "99" "-c" "8192" "-b" "4096" "-ub" "4096" "--parallel" "16" "--pooling" "mean" ];
+        port = 11435;      # optional; omit for the next free port from embeddingBasePort
+        autostart = true;  # load with the router and restart when it dies
       };
     };
   };

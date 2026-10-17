@@ -18,8 +18,14 @@ let
       QUEUE_HEAD_GRACE = cfg.queueHeadGrace;
     } // lib.optionalAttrs (cfg.gpuCount != null) { NUM_GPUS = cfg.gpuCount; }
       // cfg.routerSettings;
+    EMBEDDING = lib.mapAttrs (_: e:
+      { inherit (e) model args autostart; }
+      // lib.optionalAttrs (e.gpus != null) { inherit (e) gpus; }
+      // lib.optionalAttrs (e.port != null) { inherit (e) port; }
+    ) cfg.embeddingModels;
     "API-port" = cfg.port;
     "LLM-base-port" = cfg.llmBasePort;
+    "EMBEDDING-base-port" = cfg.embeddingBasePort;
     "llama-server-executable" = "${cfg.llamaCpp}/bin/llama-server";
   });
 
@@ -100,6 +106,70 @@ in
       type = lib.types.port;
       default = 30000;
       description = "First port used for spawned llama-server instances.";
+    };
+
+    embeddingBasePort = lib.mkOption {
+      type = lib.types.port;
+      default = 31000;
+      description = "First port used for embedding models that do not set their own `port`.";
+    };
+
+    embeddingModels = lib.mkOption {
+      type = lib.types.attrsOf (lib.types.submodule {
+        options = {
+          model = lib.mkOption {
+            type = lib.types.str;
+            example = "/data/llm-models/embeddings/nomic-embed-text-v2-moe.gguf";
+            description = "Path to the embedding model's gguf.";
+          };
+          args = lib.mkOption {
+            type = lib.types.listOf lib.types.str;
+            default = [];
+            example = [ "-ngl" "99" "-c" "8192" "-ub" "4096" "--parallel" "16" "--pooling" "mean" ];
+            description = ''
+              Extra llama-server arguments, written as on the command line. The router
+              already passes `--embedding`, `-m`, `--alias`, `--host`, `--port` and `--metrics`.
+            '';
+          };
+          gpus = lib.mkOption {
+            type = lib.types.nullOr (lib.types.oneOf [ (lib.types.listOf lib.types.int) lib.types.int lib.types.str ]);
+            default = null;
+            description = "GPU ids the process is masked to, as for `models`; null = GPU 0 only.";
+          };
+          port = lib.mkOption {
+            type = lib.types.nullOr lib.types.port;
+            default = null;
+            example = 11435;
+            description = ''
+              A fixed port for the process, so clients that call llama-server directly,
+              including its `/tokenize`, keep working. null = the next free port from `embeddingBasePort`.
+            '';
+          };
+          autostart = lib.mkOption {
+            type = lib.types.bool;
+            default = false;
+            description = "Load at router start and bring the process back whenever it dies, until it is unloaded by hand.";
+          };
+        };
+      });
+      default = {};
+      example = lib.literalExpression ''
+        {
+          "nomic-embed-text-v2-moe" = {
+            model = "/data/llm-models/embeddings/nomic-embed-text-v2-moe.gguf";
+            args = [ "-ngl" "99" "-c" "8192" "-ub" "4096" "--parallel" "16" "--pooling" "mean" ];
+            port = 11435;
+            autostart = true;
+          };
+        }
+      '';
+      description = ''
+        Embedding models, each run as its own `llama-server --embedding` process beside the LLMs.
+        They take no part in the LLM scheduler: no per-GPU lock, no count against
+        `maxModelsPerGpu`, and no eviction when an LLM loads, so an embedding model and an
+        LLM share a GPU as long as both fit in its memory. A request whose `model` names one
+        goes straight to its process, and the Embeddings tab loads, unloads and restarts them.
+      '';
     };
 
     user = lib.mkOption {

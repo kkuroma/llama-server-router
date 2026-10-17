@@ -28,6 +28,10 @@ async def _shutdown(router: LLMRouter):
         await router.stop()
     except Exception as exc:
         print(f"[main] error during router.stop(): {exc}", flush=True)
+    try:
+        await router.embeddings.stop()
+    except Exception as exc:
+        print(f"[main] error during embeddings.stop(): {exc}", flush=True)
     print("[main] all instances stopped.", flush=True)
 
 
@@ -42,6 +46,7 @@ def _print_status(router: LLMRouter):
     print(f"[main] LLM Router listening on port {api_port}", flush=True)
     print(f"[main] status : {router.status.value}", flush=True)
     print(f"[main] instances: {sorted(router.processes.keys())}", flush=True)
+    print(f"[main] embeddings: {[(e['id'], e['port'], e['status']) for e in router.embeddings.report()]}", flush=True)
 
 
 async def main():
@@ -53,6 +58,8 @@ async def main():
     """
     router = LLMRouter(ROUTER_CONFIG_PATH, LLAMA_PRESETS_PATH)
     await router.start()
+    # Started apart from the LLMs, so the dashboard's router Stop leaves them up
+    await router.embeddings.start()
     await router.init_history_db()
     _print_status(router)
     api.router = router
@@ -109,7 +116,7 @@ async def main():
     except Exception as exc:
         print(f"[main] uvicorn exited with error: {exc}", flush=True)
     finally:
-        if router.processes:
+        if router.processes or router.embeddings.processes:
             await _shutdown(router)
 
 

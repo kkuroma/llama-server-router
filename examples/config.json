@@ -1,20 +1,51 @@
 {
     "LLM": {
-        "GPT-OSS-20B": { 
-            "num_instance": 1, 
-            "gpus": [0, 1] 
+        "GPT-OSS-20B": {
+            "num_instance": 1,
+            "gpus": [
+                0,
+                1
+            ]
         },
-        "GLM-4.7-Flash": { 
-            "num_instance": 1, 
-            "gpus": [2] 
+        "GLM-4.7-Flash": {
+            "num_instance": 1,
+            "gpus": [
+                2
+            ]
         },
-        "Qwen3.8-27B": { 
+        "Qwen3.8-27B": {
             "num_instance": 2,
-            "gpus": [0, 2] 
+            "gpus": [
+                0,
+                2
+            ]
         },
-        "Big-Model": { 
-            "num_instance": 1, 
+        "Big-Model": {
+            "num_instance": 1,
             "gpus": "all"
+        }
+    },
+    "EMBEDDING": {
+        "nomic-embed-text-v2-moe": {
+            "model": "/models/nomic-embed-text-v2-moe.gguf",
+            "args": [
+                "-ngl",
+                "99",
+                "-c",
+                "8192",
+                "-b",
+                "4096",
+                "-ub",
+                "4096",
+                "--parallel",
+                "16",
+                "--pooling",
+                "mean"
+            ],
+            "gpus": [
+                0
+            ],
+            "autostart": true
         }
     },
     "ROUTER": {
@@ -33,5 +64,6 @@
     },
     "API-port": 11434,
     "LLM-base-port": 30000,
-    "llama-server-executable": "/app/llama-server"
+    "llama-server-executable": "/app/llama-server",
+    "EMBEDDING-base-port": 31000
 }

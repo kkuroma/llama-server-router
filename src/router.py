@@ -12,6 +12,7 @@ import httpx
 
 import aiosqlite
 from api_addon import build_report
+from embedding import EmbeddingCfg, EmbeddingPool
 
 HISTORY_DB_PATH = os.environ.get("HISTORY_DB_PATH", "/webui/monitor/history.db")
 
@@ -52,8 +53,10 @@ class RouterSettings(TypedDict, total=False):
 # Keys carry hyphens, so this TypedDict uses the functional syntax.
 RouterConfig = TypedDict("RouterConfig", {
     "LLM": dict[str, ModelCfg],
+    "EMBEDDING": NotRequired[dict[str, EmbeddingCfg]],
     "API-port": NotRequired[int],
     "LLM-base-port": int,
+    "EMBEDDING-base-port": NotRequired[int],
     "llama-server-executable": str,
     "ROUTER": NotRequired[RouterSettings],
 })
@@ -206,6 +209,8 @@ class LLMRouter:
                 self.router_config["API-port"] -> int (port to expose the router)
                 self.router_config["LLM-base-port"] -> int (first port for llama-server instances)
                 self.router_config["llama-server-executable"] -> str (path to the llama-server binary)
+                self.router_config["EMBEDDING"] -> {model_id: {model: path, args: [...], gpus, port, autostart}}
+                self.router_config["EMBEDDING-base-port"] -> int (first port for embedding models without one)
                 self.router_config["ROUTER"] -> reassign router values
             '''
             router_settings: RouterSettings = cast(RouterSettings, self.router_config.get("ROUTER", {}))
@@ -273,6 +278,15 @@ class LLMRouter:
         self._scheduler_task: asyncio.Task[None] | None = None
         self._history_db_path = HISTORY_DB_PATH
         self._history_db_ready = False
+        # Embedding models run beside the scheduler, so nothing above counts or evicts them
+        self.embeddings = EmbeddingPool(
+            self.router_config.get("EMBEDDING", {}),
+            self.router_config["llama-server-executable"],
+            self.router_config.get("EMBEDDING-base-port", self.router_config["LLM-base-port"] + 1000),
+            self._resolve_gpus,
+            health_timeout=self.HEALTH_CHECK_TIMEOUT,
+            kill_timeout=self.GRACEFUL_KILL_TIMEOUT,
+        )
 
     # History DB
 
