@@ -115,6 +115,63 @@ def get_router() -> LLMRouter:
         raise HTTPException(status_code=503, detail="Router not initialized")
     return router
 
+# Paths a health or listing probe calls, answered without loading the model
+META_PATHS = ("v1/models", "models", "health", "router")
+
+
+def _embedding_meta(r: LLMRouter, model_id: str, path: str) -> JSONResponse | None:
+    """
+    Answers a probe of one embedding model from the router's own state, so probing never loads it
+
+    A listing names the model whether or not it is loaded, since a call would load it, and
+    /health and /router report it available with whether it is loaded right now.
+
+    Args:
+        r (LLMRouter)   : The router
+        model_id (str)  : The embedding model probed
+        path (str)      : The path asked for, with or without its leading slash
+
+    Returns:
+        The answer, or None when the path is real work for the model
+    """
+    path = path.strip("/")
+    if path not in META_PATHS:
+        return None
+    ready = r.embeddings.is_ready(model_id)
+    if path in ("v1/models", "models"):
+        return JSONResponse({"object": "list", "data": [{"id": model_id, "object": "model", "owned_by": "llama-router", "loaded": ready}]})
+    # an unloaded model is still available, since a call loads it, so neither path reports it down
+    return JSONResponse({"status": "ok" if path == "health" else "idle", "loaded": ready})
+
+# An embedding model's public port belongs to the router, so a call there loads the model first
+
+@app.middleware("http")
+async def embedding_front_door(request: Request, call_next):
+    """
+    Sends every request that arrived on an embedding model's public port to that model
+
+    The model's own llama-server listens on an internal port, so a call on the public one
+    finds the router even while the model is unloaded, and waits on its load like any request.
+
+    Args:
+        request (Request)   : The incoming request
+        call_next (callable): The rest of the app, for every other port
+    """
+    r = router
+    server = request.scope.get("server") or (None, None)
+    model_id = r.embeddings.public_model(server[1]) if r is not None else None
+    if model_id is None or r is None:
+        return await call_next(request)
+    probed = _embedding_meta(r, model_id, request.url.path)
+    if probed is not None:
+        return probed
+    target = request.url.path + (f"?{request.url.query}" if request.url.query else "")
+    try:
+        resp = await r.embeddings.forward(model_id, request.method, target, await request.body(), _forward_headers(request))
+    except (RuntimeError, httpx.HTTPError) as e:
+        return JSONResponse(status_code=502, content={"error": {"message": str(e), "code": "upstream_error"}})
+    return _passthrough(resp)
+
 # Custom endpoints for the router
 
 @app.get("/")
@@ -310,6 +367,9 @@ async def embedding_proxy(model_id: str, path: str, request: Request):
     r = get_router()
     if model_id not in r.embeddings:
         raise HTTPException(status_code=404, detail=f"Embedding model {model_id} not found")
+    probed = _embedding_meta(r, model_id, path)
+    if probed is not None:
+        return probed
     target = f"/{path}" + (f"?{request.url.query}" if request.url.query else "")
     try:
         resp = await r.embeddings.forward(model_id, request.method, target, await request.body(), _forward_headers(request))

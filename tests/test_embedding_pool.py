@@ -69,6 +69,36 @@ def test_ports_and_routing():
     asyncio.run(run())
 
 
+def test_a_fixed_port_is_public_and_the_process_gets_an_internal_one():
+    """The router listens on the named port, so the process never takes it."""
+    pool = make_pool(autostart=False)
+    public = next(iter(pool.public))
+    assert pool.public_model(public) == "fixed" and pool.public_port("fixed") == public
+    assert pool.ports["fixed"] != public and pool.public_model(pool.ports["fixed"]) is None
+    assert pool.public_model(None) is None
+    state = {s["id"]: s for s in pool.report()}
+    assert state["fixed"]["port"] == public and state["fixed"]["internal_port"] == pool.ports["fixed"]
+    assert state["lazy"]["port"] == state["lazy"]["internal_port"]
+
+
+def test_concurrent_calls_on_a_cold_model_all_wait_for_its_load():
+    """A process that is up but not yet healthy is waited on rather than called."""
+
+    async def run():
+        pool = make_pool(autostart=False)
+        # a real llama-server takes seconds to answer /health, which is the window the calls race into
+        pool.models["lazy"]["args"] = ["--start-delay", "1.5"]
+        body, headers = b'{"input": ["a"]}', {"Content-Type": "application/json"}
+        try:
+            replies = await asyncio.gather(*[pool.forward("lazy", "POST", "/v1/embeddings", body, headers) for _ in range(8)])
+            assert [r.status_code for r in replies] == [200] * 8
+            assert pool.counts["lazy"][0] == 8
+        finally:
+            await pool.stop()
+
+    asyncio.run(run())
+
+
 def test_supervisor_restarts_and_unload_holds():
     """A killed autostart process is replaced, and an unloaded one is left down."""
 

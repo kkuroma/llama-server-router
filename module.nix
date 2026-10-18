@@ -111,7 +111,7 @@ in
     embeddingBasePort = lib.mkOption {
       type = lib.types.port;
       default = 31000;
-      description = "First port used for embedding models that do not set their own `port`.";
+      description = "First internal port for the embedding processes, which the router reaches them on.";
     };
 
     embeddingModels = lib.mkOption {
@@ -141,8 +141,9 @@ in
             default = null;
             example = 11435;
             description = ''
-              A fixed port for the process, so clients that call llama-server directly,
-              including its `/tokenize`, keep working. null = the next free port from `embeddingBasePort`.
+              A port the router listens on for this model. A call there, `/tokenize` included,
+              is answered like a plain llama-server and loads the model first when it is down.
+              The process itself always runs on an internal port from `embeddingBasePort`.
             '';
           };
           autostart = lib.mkOption {

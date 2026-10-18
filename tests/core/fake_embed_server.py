@@ -8,6 +8,7 @@ The pool's supervision then runs against a real child process with no GPU or wei
 
 import json
 import sys
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 DIMS = 4
@@ -46,8 +47,10 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    """Serves on the port after --port until killed."""
+    """Serves on the port after --port until killed, after --start-delay seconds when given."""
     port = int(sys.argv[sys.argv.index("--port") + 1])
+    if "--start-delay" in sys.argv:
+        time.sleep(float(sys.argv[sys.argv.index("--start-delay") + 1]))
     ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()
 
 

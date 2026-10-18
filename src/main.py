@@ -110,9 +110,14 @@ async def main():
     api_port = router.router_config.get("API-port", 8000)
     config = uvicorn.Config(app=api.app, host=ROUTER_HOST, port=api_port, log_level="info")
     server = uvicorn.Server(config)
+    # One server answers the API port and every embedding model's public port alike
+    sockets = [config.bind_socket()] + [
+        uvicorn.Config(app=api.app, host=ROUTER_HOST, port=port).bind_socket()
+        for port in sorted(router.embeddings.public)
+    ]
 
     try:
-        await server.serve()
+        await server.serve(sockets=sockets)
     except Exception as exc:
         print(f"[main] uvicorn exited with error: {exc}", flush=True)
     finally:

@@ -23,6 +23,7 @@ class EmbeddingState(TypedDict):
     id: str
     status: str
     port: int
+    internal_port: int
     pid: int | None
     gpus: list[int]
     autostart: bool
@@ -61,12 +62,16 @@ class EmbeddingPool:
         kill_timeout: float = 5.0,
     ):
         """
-        Holds the configured models and assigns each its port up front
+        Holds the configured models and assigns each its ports up front
+
+        Every process listens on an internal port from base_port. A model that names a
+        `port` gets that one as well, but the router listens on it rather than the process,
+        so a call there loads the model when it is down instead of finding nothing.
 
         Args:
             models (dict)           : The EMBEDDING section, model id to its settings
             executable (str)        : Path to the llama-server binary
-            base_port (int)         : First port for models that do not name one
+            base_port (int)         : First internal port for the processes
             resolve_gpus (callable) : The router's (model_id, raw) -> sorted GPU ids normalizer
             health_timeout (float)  : Seconds a process has to answer /health after spawning
             kill_timeout (float)    : Seconds to wait after SIGTERM before SIGKILL
@@ -76,14 +81,11 @@ class EmbeddingPool:
         self.health_timeout = health_timeout
         self.kill_timeout = kill_timeout
         self.gpus: dict[str, list[int]] = {m: resolve_gpus(m, c.get("gpus")) for m, c in models.items()}
+        self.public: dict[int, str] = {int(p): m for m, c in models.items() if (p := c.get("port"))}
         self.ports: dict[str, int] = {}
-        taken = {int(p) for c in models.values() if (p := c.get("port"))}
+        taken = set(self.public)
         nxt = base_port
-        for mid, mcfg in models.items():
-            fixed = mcfg.get("port")
-            if fixed:
-                self.ports[mid] = int(fixed)
-                continue
+        for mid in models:
             while nxt in taken:
                 nxt += 1
             self.ports[mid] = nxt
@@ -103,10 +105,30 @@ class EmbeddingPool:
     def __contains__(self, model_id: object) -> bool:
         return model_id in self.models
 
+    def public_model(self, port: int | None) -> str | None:
+        """
+        The model whose public port a request arrived on, None for the router's own port
+
+        Args:
+            port (int | None): The local port the request came in on
+
+        Returns:
+            The model id, or None
+        """
+        return self.public.get(port) if port is not None else None
+
+    def public_port(self, model_id: str) -> int | None:
+        """The port the router listens on for this model, when it names one."""
+        return next((p for p, m in self.public.items() if m == model_id), None)
+
     def is_loaded(self, model_id: str) -> bool:
         """True while the model's process is alive."""
         proc = self.processes.get(model_id)
         return proc is not None and proc.poll() is None
+
+    def is_ready(self, model_id: str) -> bool:
+        """True once the model's process is alive and has answered /health."""
+        return self.is_loaded(model_id) and model_id in self.started_at and model_id not in self.loading
 
     async def start(self):
         """Loads every autostart model and begins supervising them."""
@@ -199,7 +221,7 @@ class EmbeddingPool:
         env["HIP_VISIBLE_DEVICES"] = mask
         cmd = [
             self.executable, "--embedding", "-m", mcfg["model"], "--alias", model_id,
-            "--host", "0.0.0.0", "--port", str(port), "--metrics", *mcfg.get("args", []),
+            "--host", "127.0.0.1", "--port", str(port), "--metrics", *mcfg.get("args", []),
         ]
         print(f"[EMBED] starting {model_id} at port {port} (gpus {self.gpus[model_id]})...", flush=True)
         self.errors.pop(model_id, None)
@@ -283,7 +305,8 @@ class EmbeddingPool:
         Returns:
             The upstream response, read in full
         """
-        if not self.is_loaded(model_id):
+        # a process that is up but not yet healthy is waited on through the same load lock
+        if not self.is_ready(model_id):
             await self.load(model_id)
         clock = time.perf_counter()
         async with httpx.AsyncClient() as client:
@@ -352,7 +375,8 @@ class EmbeddingPool:
             out.append({
                 "id": mid,
                 "status": status,
-                "port": self.ports[mid],
+                "port": self.public_port(mid) or self.ports[mid],
+                "internal_port": self.ports[mid],
                 "pid": proc.pid if proc is not None and proc.poll() is None else None,
                 "gpus": self.gpus[mid],
                 "autostart": bool(mcfg.get("autostart")),

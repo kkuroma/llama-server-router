@@ -108,8 +108,8 @@ You do **not** set a `device` key in presets.ini. Masking with `CUDA_VISIBLE_DEV
 An embedding model is not an LLM preset. Each one in the config's `EMBEDDING` section (`embeddingModels` in the NixOS module) runs as its own `llama-server --embedding -m <gguf>` process, managed by the router but outside its scheduler:
 
 - **It never competes with the LLMs.** It takes no per-GPU lock, does not count against `MAX_MODELS_PER_GPU`, and an LLM load never evicts it, so one embedding model and one LLM share a GPU as long as both fit in its memory. Loading and unloading LLMs leaves it running, and so does the dashboard's router Stop.
-- **Requests skip the LLM queue.** A request whose `model` names an embedding model goes straight to that process, and loads it first if it is down. A request with no model field, such as `/tokenize`, reaches it at `/embedding/<model>/<path>` on the router's port.
-- **A fixed `port` keeps direct clients working.** With `port = 11435`, a client that already calls a standalone llama-server there, `/tokenize` included, needs no change.
+- **Requests skip the LLM queue but never find it down.** A request whose `model` names an embedding model goes straight to that process, and loads it first if it is down, whether or not it was unloaded by hand. A request with no model field, such as `/tokenize`, reaches it at `/embedding/<model>/<path>` on the router's port.
+- **A fixed `port` belongs to the router.** With `port = 11435` the router listens there and the process runs on an internal port, so a client that calls a standalone llama-server at 11435, `/tokenize` included, needs no change, and a call that finds the model unloaded loads it and waits rather than failing. Concurrent calls during a load all wait on the one load.
 - **`autostart` keeps it up.** An autostart model loads with the router and is brought back within seconds whenever its process dies, until it is unloaded by hand. A model whose load failed is retried after a minute.
 - **The `/embed` tab** lists every embedding model with its port, pid, GPUs, uptime, request count and recent milliseconds per input, with Load, Unload and Restart, and a box that embeds one text and times it.
 
@@ -118,7 +118,7 @@ An embedding model is not an LLM preset. Each one in the config's `EMBEDDING` se
 | `model` | path to the gguf |
 | `args` | extra llama-server arguments as on the command line, beyond the `--embedding -m --alias --host --port --metrics` the router passes |
 | `gpus` | GPU ids the process is masked to, as for LLMs, GPU 0 when omitted |
-| `port` | a fixed port, else the next free one from `EMBEDDING-base-port` (`embeddingBasePort`, default 31000) |
+| `port` | a port the router listens on for this model, loading it on the first call; the process itself always takes an internal port from `EMBEDDING-base-port` (`embeddingBasePort`, default 31000) |
 | `autostart` | load at router start and restart when the process dies |
 
 The process gets its own slots, so size `-c` as slots times the model's training context: `-c 8192 --parallel 16` gives 16 slots of 512 for nomic-embed-text-v2-moe. An input longer than one slot is rejected with a 400, so clients truncate by tokens.
@@ -191,7 +191,7 @@ Import `llama-router.nixosModules.default` into your host and configure:
       "nomic-embed-text-v2-moe" = {
         model = "/data/llm-models/embeddings/nomic-embed-text-v2-moe.gguf";
         args = [ "-ngl" "99" "-c" "8192" "-b" "4096" "-ub" "4096" "--parallel" "16" "--pooling" "mean" ];
-        port = 11435;      # optional; omit for the next free port from embeddingBasePort
+        port = 11435;      # optional; the router listens here and loads the model on the first call
         autostart = true;  # load with the router and restart when it dies
       };
     };
